@@ -27,7 +27,7 @@ bg_subtractor = cv2.createBackgroundSubtractorMOG2(
 # ==================================================
 # VIDEO INPUT (20 seconds limit)
 # ==================================================
-video_path = "sampleVideos/1/R_11.mp4"
+video_path = "sampleVideos/1/R_13.mp4"
 cap = cv2.VideoCapture(video_path)
 
 fps = cap.get(cv2.CAP_PROP_FPS)
@@ -114,12 +114,18 @@ def estimate_people_count(frame):
 # FIGHT TYPE (STRICT)
 # --------------------------------------------------
 def classify_fight_type(action, emotion, person_count):
+    # print(f"{action}  {emotion}  {person_count}")
     if action != "Fight / Attack":
-        return "NO_FIGHT"
-
-    # SELF PRACTICE only if exactly ONE person
-    if person_count == 1:
-        return "SELF_PRACTICE"
+        if action == "Sleeping / Fallen":
+            return "Fallen"
+        elif person_count <= 1:
+            return "SELF_PRACTICE"  # SELF PRACTICE only if exactly ONE person   
+        else:
+            return "NO_FIGHT"
+    if action == "Fight / Attack" :
+        if person_count <= 1:
+            return "SELF_PRACTICE"
+        
 
     # Multiple persons → NEVER self practice
     if emotion in ["fear", "sad"]:
@@ -136,21 +142,23 @@ def assess_risk_and_score(fight_type, action, emotion, person_count):
     score = 0
 
     if action == "Fight / Attack":
-        score += 40
+        score += 25
     if emotion in ["angry", "fear", "sad"]:
-        score += 30
+        score += 10
     if person_count >= 2:
         score += 20
     if action == "Running" and emotion in ["angry", "fear", "sad"]:
         score += 10
-    if action in ["Fall Detected", "Sleeping / Fallen"]:
-        score += 25
+    if action in ["Sleeping / Fallen"]:
+        score += 40
+    if action in ["Fall Detected"]:
+        score += 10    
 
     score = min(score, 100)
 
     if score >= 70:
         return "MALICIOUS", score
-    elif score >= 25:
+    elif score > 25:
         return "SUSPICIOUS", score
     else:
         return "SAFE", score
@@ -253,7 +261,7 @@ idx = threat_score_log.index(max_threat)
 
 final_fight_type = fight_type_log[idx]
 
-# 🚫 NEVER allow SELF_PRACTICE if multiple persons seen
+# 🚫 NEVER allow SELF_ PRACTICE if multiple persons seen
 if final_fight_type == "SELF_PRACTICE" and max(person_count_log) >= 2:
     if emotion_log[idx] in ["fear", "sad"]:
         final_fight_type = "PUNISHMENT"
