@@ -1,10 +1,34 @@
-import cv2
+import base64
+import argparse
+import json
+import os
 from collections import Counter
+
+import cv2
 import numpy as np
 import mediapipe as mp
-from fer import FER
+import tensorflow as tf
+from openai import OpenAI
 import warnings
 warnings.filterwarnings("ignore")
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+CONFIG_PATH = os.environ.get(
+    "APP_CONFIG_FILE", os.path.join(BASE_DIR, "config.json")
+)
+try:
+    with open(CONFIG_PATH, "r", encoding="utf-8") as config_file:
+        app_config = json.load(config_file)
+except FileNotFoundError as exc:
+    raise FileNotFoundError(
+        f"Config file not found: {CONFIG_PATH}. Create it from config.example.json "
+        "and set OPENAI_API_KEY."
+    ) from exc
+except json.JSONDecodeError as exc:
+    raise ValueError(f"Invalid JSON in config file: {CONFIG_PATH}") from exc
+
+OPENAI_API_KEY = str(app_config.get("OPENAI_API_KEY", "")).strip()
+if not OPENAI_API_KEY:
+    raise ValueError(f"Set OPENAI_API_KEY in the config file: {CONFIG_PATH}")
 
 # ==================================================
 # INITIALIZE MODELS
@@ -18,7 +42,16 @@ pose = mp_pose.Pose(
     min_tracking_confidence=0.5
 )
 
-emotion_detector = FER(mtcnn=True)
+EMOTION_LABELS = ("anger", "disgust", "sad", "happiness", "surprise")
+emotion_model_path = os.path.join(BASE_DIR, "FacialExpression_weights.keras")
+if not os.path.isfile(emotion_model_path):
+    raise FileNotFoundError(f"Trained emotion model not found: {emotion_model_path}")
+emotion_model = tf.keras.models.load_model(emotion_model_path, compile=False)
+
+face_detector = mp.solutions.face_detection.FaceDetection(
+    model_selection=0,
+    min_detection_confidence=0.5,
+)
 
 bg_subtractor = cv2.createBackgroundSubtractorMOG2(
     history=300, varThreshold=80, detectShadows=False
@@ -27,8 +60,35 @@ bg_subtractor = cv2.createBackgroundSubtractorMOG2(
 # ==================================================
 # VIDEO INPUT (20 seconds limit)
 # ==================================================
-video_path = "sampleVideos/1/R_13.mp4"
+default_video_path = os.path.join(BASE_DIR, "sampleVideos", "1", "video2.mp4")
+# Also support the sample video being placed under the project's venv folder.
+if not os.path.isfile(default_video_path):
+    venv_sample_path = os.path.join(BASE_DIR, "venv", "sampleVideos", "1", "video2.mp4")
+    if os.path.isfile(venv_sample_path):
+        default_video_path = venv_sample_path
+parser = argparse.ArgumentParser(description="Analyze a video with CV and OpenAI vision.")
+parser.add_argument(
+    "video",
+    nargs="?",
+    default=default_video_path,
+    help="Video file to analyze (defaults to sampleVideos/1/video2.mp4).",
+)
+parser.add_argument(
+    "--no-preview",
+    action="store_true",
+    help="Process without opening the desktop preview window.",
+)
+args = parser.parse_args()
+show_preview = not args.no_preview
+video_path = os.path.abspath(args.video)
 cap = cv2.VideoCapture(video_path)
+if not cap.isOpened():
+    raise FileNotFoundError(
+        f"Could not open input video: {video_path}\n"
+        "Pass a readable video path, for example: python main.py path\\to\\video.mp4"
+    )
+
+output_video_path = os.path.splitext(video_path)[0] + "_annotated.mp4"
 
 fps = cap.get(cv2.CAP_PROP_FPS)
 if fps == 0:
@@ -37,6 +97,9 @@ if fps == 0:
 MAX_SECONDS = 20
 MAX_FRAMES = int(fps * MAX_SECONDS)
 frame_counter = 0
+SAMPLE_INTERVAL_SECONDS = 1.0
+next_sample_time = 0.0
+sampled_frames = []
 
 # ==================================================
 # GLOBAL VARIABLES
@@ -130,7 +193,7 @@ def classify_fight_type(action, emotion, person_count):
     # Multiple persons → NEVER self practice
     if emotion in ["fear", "sad"]:
         return "PUNISHMENT"
-    if emotion == "angry":
+    if emotion == "anger":
         return "ATTACK"
 
     return "ATTACK"
@@ -143,11 +206,11 @@ def assess_risk_and_score(fight_type, action, emotion, person_count):
 
     if action == "Fight / Attack":
         score += 25
-    if emotion in ["angry", "fear", "sad"]:
+    if emotion in ["anger", "fear", "sad"]:
         score += 10
     if person_count >= 2:
         score += 20
-    if action == "Running" and emotion in ["angry", "fear", "sad"]:
+    if action == "Running" and emotion in ["anger", "fear", "sad"]:
         score += 10
     if action in ["Sleeping / Fallen"]:
         score += 40
@@ -163,13 +226,108 @@ def assess_risk_and_score(fight_type, action, emotion, person_count):
     else:
         return "SAFE", score
 
+
+def analyze_video_with_llm(frames, signals):
+    """Ask a vision model for a cautious scene assessment from sampled frames."""
+    if not frames:
+        raise ValueError("No video frames were available for LLM analysis.")
+    client = OpenAI(api_key=OPENAI_API_KEY)
+    content = [{
+        "type": "input_text",
+        "text": (
+            "Review these chronologically ordered video frames and the accompanying "
+            "computer-vision summaries. Classify only observable events, not a person's "
+            "intent, character, or guilt. Do not infer aggression from facial emotion alone. "
+            "Use POSSIBLE_PHYSICAL_AGGRESSION only when visible physical interaction supports "
+            "it; use FALL_OR_DISTRESS for a visible fall or apparent distress; use "
+            "NO_CLEAR_PHYSICAL_AGGRESSION when evidence does not support aggression; use "
+            "UNCLEAR when the frames are insufficient. Return concise evidence grounded in "
+            "the frames, mention uncertainty, and output JSON matching the required schema.\n\n"
+            f"Video duration analyzed: {signals['duration_seconds']:.1f} seconds.\n"
+            f"Sampled frames: {len(frames)}.\n"
+            f"Aggregated action labels: {json.dumps(signals['actions'])}.\n"
+            f"Aggregated emotion labels: {json.dumps(signals['emotions'])}.\n"
+            f"Observed face counts: {json.dumps(signals['face_counts'])}."
+        ),
+    }]
+    for timestamp, image_data in frames:
+        content.append({
+            "type": "input_text",
+            "text": f"Frame at {timestamp:.1f} seconds:",
+        })
+        content.append({
+            "type": "input_image",
+            "image_url": f"data:image/jpeg;base64,{image_data}",
+            "detail": "high",
+        })
+
+    schema = {
+        "type": "object",
+        "properties": {
+            "assessment": {
+                "type": "string",
+                "enum": [
+                    "POSSIBLE_PHYSICAL_AGGRESSION",
+                    "NO_CLEAR_PHYSICAL_AGGRESSION",
+                    "FALL_OR_DISTRESS",
+                    "UNCLEAR",
+                ],
+            },
+            "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+            "summary": {"type": "string"},
+            "evidence": {"type": "array", "items": {"type": "string"}},
+            "uncertainties": {"type": "array", "items": {"type": "string"}},
+        },
+        "required": ["assessment", "confidence", "summary", "evidence", "uncertainties"],
+        "additionalProperties": False,
+    }
+    response = client.responses.create(
+        model=os.getenv("OPENAI_MODEL", "gpt-6.1-terra"),
+        input=[{"role": "user", "content": content}],
+        text={
+            "format": {
+                "type": "json_schema",
+                "name": "video_scene_assessment",
+                "strict": True,
+                "schema": schema,
+            }
+        },
+        store=False,
+    )
+    return json.loads(response.output_text)
+
 # ==================================================
 # MAIN LOOP
 # ==================================================
+preview_window = "Surveillance - Fight Intent Analysis"
+if show_preview:
+    cv2.namedWindow(preview_window, cv2.WINDOW_NORMAL)
+preview_max_width = 960
+preview_max_height = 650
+
 while cap.isOpened() and frame_counter < MAX_FRAMES:
     ret, frame = cap.read()
     if not ret:
         break
+
+    video_time = cap.get(cv2.CAP_PROP_POS_MSEC) / 1000.0
+    if video_time <= 0:
+        video_time = frame_counter / fps
+    if video_time >= next_sample_time:
+        sample = frame
+        sample_height, sample_width = sample.shape[:2]
+        if sample_width > 640:
+            resized_height = round(sample_height * 640 / sample_width)
+            sample = cv2.resize(sample, (640, resized_height))
+        encoded_ok, encoded_frame = cv2.imencode(
+            ".jpg", sample, [cv2.IMWRITE_JPEG_QUALITY, 75]
+        )
+        if encoded_ok:
+            sampled_frames.append((
+                video_time,
+                base64.b64encode(encoded_frame).decode("ascii"),
+            ))
+        next_sample_time = video_time + SAMPLE_INTERVAL_SECONDS
 
     h, w, _ = frame.shape
     results = pose.process(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
@@ -179,19 +337,51 @@ while cap.isOpened() and frame_counter < MAX_FRAMES:
             results.pose_landmarks.landmark, prev_center, prev_height, w, h
         )
 
-    detections = emotion_detector.detect_emotions(frame)
+    rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+    face_results = face_detector.process(rgb_frame)
+    face_rois = []
+    face_boxes = []
+    if face_results.detections:
+        for detection in face_results.detections:
+            relative_box = detection.location_data.relative_bounding_box
+            x1 = max(0, int(relative_box.xmin * w))
+            y1 = max(0, int(relative_box.ymin * h))
+            x2 = min(w, int((relative_box.xmin + relative_box.width) * w))
+            y2 = min(h, int((relative_box.ymin + relative_box.height) * h))
+            if x2 <= x1 or y2 <= y1:
+                continue
+
+            face_crop = frame[y1:y2, x1:x2]
+            gray_face = cv2.cvtColor(face_crop, cv2.COLOR_BGR2GRAY)
+            resized_face = cv2.resize(
+                gray_face, (96, 96), interpolation=cv2.INTER_CUBIC
+            )
+            face_rois.append(resized_face.astype(np.float32) / 255.0)
+            face_boxes.append((x1, y1, x2 - x1, y2 - y1))
+
     dominant_emotion = "neutral"
-    face_count = len(detections)
-
-    for face in detections:
-        (x, y, fw, fh) = face["box"]
-        emotions = face["emotions"]
-        face_emotion = max(emotions, key=emotions.get)
-        dominant_emotion = face_emotion
-
-        cv2.rectangle(frame, (x, y), (x + fw, y + fh), (0, 255, 0), 1)
-        cv2.putText(frame, face_emotion, (x, y - 5),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 255, 0), 1)
+    face_count = len(face_rois)
+    if face_rois:
+        face_inputs = np.stack(face_rois, axis=0)[..., np.newaxis]
+        emotion_scores = emotion_model(face_inputs, training=False).numpy()
+        strongest_face_confidence = -1.0
+        for (x, y, fw, fh), scores in zip(face_boxes, emotion_scores):
+            emotion_index = int(np.argmax(scores))
+            face_emotion = EMOTION_LABELS[emotion_index]
+            confidence = float(scores[emotion_index])
+            if confidence > strongest_face_confidence:
+                dominant_emotion = face_emotion
+                strongest_face_confidence = confidence
+            cv2.rectangle(frame, (x, y), (x + fw, y + fh), (0, 255, 0), 2)
+            cv2.putText(
+                frame,
+                f"{face_emotion} {confidence:.0%}",
+                (x, max(15, y - 5)),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.7,
+                (0, 255, 0),
+                2,
+            )
 
     motion_count = estimate_people_count(frame)
 
@@ -214,24 +404,56 @@ while cap.isOpened() and frame_counter < MAX_FRAMES:
     person_count_log.append(person_count)
     face_count_log.append(face_count)
 
-    # DISPLAY (UNCHANGED)
-    cv2.rectangle(frame, (0, 0), (frame.shape[1], 90), (0, 0, 0), -1)
-    cv2.putText(frame, f"Action: {ACTION_LABEL}", (10, 22),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255,255,0), 1)
-    cv2.putText(frame, f"Emotion: {dominant_emotion}", (10, 40),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0,255,255), 1)
-    cv2.putText(frame, f"Fight Type: {fight_type}", (10, 58),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255,200,0), 1)
-    cv2.putText(frame, f"Risk: {risk}", (10, 76),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.5,
+    # Larger labels remain readable in both the output video and smaller preview.
+    overlay_font = max(0.65, min(1.0, frame.shape[1] / 900.0))
+    overlay_thickness = 2
+    overlay_line_height = int(38 * overlay_font)
+    overlay_margin = int(12 * overlay_font)
+    overlay_height = overlay_line_height * 4 + overlay_margin * 2
+    cv2.rectangle(frame, (0, 0), (frame.shape[1], overlay_height), (0, 0, 0), -1)
+    cv2.putText(frame, f"Action: {ACTION_LABEL}", (overlay_margin, overlay_margin + overlay_line_height),
+                cv2.FONT_HERSHEY_SIMPLEX, overlay_font, (255,255,0), overlay_thickness)
+    cv2.putText(frame, f"Emotion: {dominant_emotion}", (overlay_margin, overlay_margin + overlay_line_height * 2),
+                cv2.FONT_HERSHEY_SIMPLEX, overlay_font, (0,255,255), overlay_thickness)
+    cv2.putText(frame, f"Fight Type: {fight_type}", (overlay_margin, overlay_margin + overlay_line_height * 3),
+                cv2.FONT_HERSHEY_SIMPLEX, overlay_font, (255,200,0), overlay_thickness)
+    cv2.putText(frame, f"Risk: {risk}", (overlay_margin, overlay_margin + overlay_line_height * 4),
+                cv2.FONT_HERSHEY_SIMPLEX, overlay_font,
                 (0,0,255) if risk=="MALICIOUS"
                 else (0,255,255) if risk=="SUSPICIOUS"
-                else (0,255,0), 1)
+                else (0,255,0), overlay_thickness)
 
-    cv2.imshow("Surveillance – Fight Intent Analysis", frame)
+    if frame_counter == 0:
+        height, width = frame.shape[:2]
+        fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+        video_writer = cv2.VideoWriter(
+            output_video_path, fourcc, fps, (width, height)
+        )
+        if not video_writer.isOpened():
+            cap.release()
+            raise RuntimeError(f"Could not create output video: {output_video_path}")
+    video_writer.write(frame)
+
+    if show_preview:
+        # Scale only the on-screen preview; the saved video keeps the source size.
+        preview_scale = min(
+            1.0,
+            preview_max_width / frame.shape[1],
+            preview_max_height / frame.shape[0],
+        )
+        preview_frame = cv2.resize(
+            frame,
+            None,
+            fx=preview_scale,
+            fy=preview_scale,
+            interpolation=cv2.INTER_AREA,
+        )
+        cv2.imshow(preview_window, preview_frame)
     frame_counter += 1
+    if frame_counter % max(1, int(fps)) == 0:
+        print(f"Processed {frame_counter} frames...", flush=True)
 
-    if cv2.waitKey(25) & 0xFF == ord("q"):
+    if show_preview and cv2.waitKey(25) & 0xFF == ord("q"):
         break
     
 # print("\n================ FRAME BY FRAME LOGS ================")
@@ -251,7 +473,25 @@ while cap.isOpened() and frame_counter < MAX_FRAMES:
 # print("=====================================================\n")
        
 cap.release()
-cv2.destroyAllWindows()
+if "video_writer" in globals():
+    video_writer.release()
+if show_preview:
+    cv2.destroyAllWindows()
+
+print(f"Annotated video saved to: {output_video_path}", flush=True)
+
+if not action_log:
+    raise RuntimeError("The video contained no readable frames to analyze.")
+
+llm_assessment = analyze_video_with_llm(
+    sampled_frames,
+    {
+        "duration_seconds": frame_counter / fps,
+        "actions": dict(Counter(action_log)),
+        "emotions": dict(Counter(emotion_log)),
+        "face_counts": dict(Counter(face_count_log)),
+    },
+)
 
 # ==================================================
 # FINAL CONCLUSION (FORCED CONSISTENCY)
@@ -281,6 +521,18 @@ print("-----------------------------------------------------")
 print("LOGIC APPLIED             : Multi-person evaluation")
 print("REASON                    : Action + Emotion based")
 print("=====================================================\n")
+
+print("\n================ OPENAI VISION ASSESSMENT ================")
+print(f"Assessment                : {llm_assessment['assessment']}")
+print(f"Confidence                : {llm_assessment['confidence']:.0%}")
+print(f"Summary                   : {llm_assessment['summary']}")
+print("Evidence:")
+for item in llm_assessment["evidence"]:
+    print(f"  - {item}")
+print("Uncertainties:")
+for item in llm_assessment["uncertainties"]:
+    print(f"  - {item}")
+print("===========================================================\n")
 
 print("\n================ PERCENTAGE SUMMARY (TABLE) ================")
 

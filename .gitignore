@@ -1,0 +1,44 @@
+# Local secrets and environment-specific settings
+config.json
+.env
+.env.*
+!.env.example
+
+# Python virtual environments
+venv/
+.venv/
+env/
+ENV/
+
+# Python caches and tooling output
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Jupyter temporary files
+.ipynb_checkpoints/
+
+# Large local training datasets (Emotion.py expects these locally)
+Dataset/
+
+# Extra model checkpoints; the app uses the root-level
+# FacialExpression_weights.keras file
+model/
+
+# Generated processed videos and runtime logs
+*_annotated.mp4
+*.log
+
+# Build output
+build/
+dist/
+*.egg-info/
+
+# OS metadata
+.DS_Store
+Thumbs.db
+desktop.ini
