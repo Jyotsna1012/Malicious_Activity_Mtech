@@ -74,22 +74,35 @@ if uploaded_video and st.button("Process video", type="primary"):
     except Exception as exc:
         processor_output = f"{type(exc).__name__}: {exc}\n\n{traceback.format_exc()}"
 
-    if video_bytes:
+    st.session_state["video_result"] = {
+        "video_bytes": video_bytes,
+        "returncode": result.returncode if result is not None else None,
+        "processor_output": processor_output,
+        "file_stem": Path(uploaded_video.name).stem,
+        "upload_name": uploaded_video.name,
+    }
+
+
+video_result = st.session_state.get("video_result")
+if video_result and uploaded_video and video_result["upload_name"] == uploaded_video.name:
+    result_video = video_result["video_bytes"]
+    if result_video:
         st.success("Processed video is ready to preview and download.")
-        st.video(video_bytes)
+        st.video(result_video)
         st.download_button(
             "Download processed video",
-            data=video_bytes,
-            file_name=f"{Path(uploaded_video.name).stem}_annotated.mp4",
+            data=result_video,
+            file_name=f"{video_result['file_stem']}_annotated.mp4",
             mime="video/mp4",
             type="primary",
         )
 
-    if result is not None and result.returncode != 0:
-        st.error(f"Video processing exited with code {result.returncode}.")
+    returncode = video_result["returncode"]
+    if returncode is not None and returncode != 0:
+        st.error(f"Video processing exited with code {returncode}.")
         with st.expander("Error details", expanded=True):
-            st.code(processor_output[-20000:] or "The processor returned no error text.")
-    elif result is None or not video_bytes:
+            st.code(video_result["processor_output"][-20000:] or "The processor returned no error text.")
+    elif returncode is None or not result_video:
         st.error("Video processing failed.")
         with st.expander("Error details", expanded=True):
-            st.code(processor_output[-20000:] or "No error details were produced.")
+            st.code(video_result["processor_output"][-20000:] or "No error details were produced.")

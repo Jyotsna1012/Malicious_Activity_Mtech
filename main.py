@@ -2,6 +2,7 @@ import base64
 import argparse
 import json
 import os
+import subprocess
 from collections import Counter
 
 import cv2
@@ -481,6 +482,35 @@ if "video_writer" in globals():
     video_writer.release()
 if show_preview:
     cv2.destroyAllWindows()
+
+# mp4v (MPEG-4 Part 2) is not playable in browsers; transcode to H.264.
+h264_path = os.path.splitext(output_video_path)[0] + "_h264.mp4"
+try:
+    import imageio_ffmpeg
+
+    subprocess.run(
+        [
+            imageio_ffmpeg.get_ffmpeg_exe(),
+            "-y",
+            "-i", output_video_path,
+            "-c:v", "libx264",
+            "-pix_fmt", "yuv420p",
+            "-movflags", "+faststart",
+            "-loglevel", "error",
+            h264_path,
+        ],
+        check=True,
+        capture_output=True,
+    )
+    os.replace(h264_path, output_video_path)
+    print("Video transcoded to H.264 for browser playback.", flush=True)
+except Exception as exc:
+    print(f"H.264 transcode skipped: {type(exc).__name__}: {exc}", flush=True)
+    if os.path.exists(h264_path):
+        try:
+            os.remove(h264_path)
+        except OSError:
+            pass
 
 print(f"Annotated video saved to: {output_video_path}", flush=True)
 
