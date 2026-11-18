@@ -487,15 +487,25 @@ print(f"Annotated video saved to: {output_video_path}", flush=True)
 if not action_log:
     raise RuntimeError("The video contained no readable frames to analyze.")
 
-llm_assessment = analyze_video_with_llm(
-    sampled_frames,
-    {
-        "duration_seconds": frame_counter / fps,
-        "actions": dict(Counter(action_log)),
-        "emotions": dict(Counter(emotion_log)),
-        "face_counts": dict(Counter(face_count_log)),
-    },
-)
+try:
+    llm_assessment = analyze_video_with_llm(
+        sampled_frames,
+        {
+            "duration_seconds": frame_counter / fps,
+            "actions": dict(Counter(action_log)),
+            "emotions": dict(Counter(emotion_log)),
+            "face_counts": dict(Counter(face_count_log)),
+        },
+    )
+except Exception as exc:
+    print(f"LLM assessment skipped: {type(exc).__name__}: {exc}", flush=True)
+    llm_assessment = {
+        "assessment": "UNCLEAR",
+        "confidence": 0.0,
+        "summary": "LLM assessment unavailable; heuristic analysis only.",
+        "evidence": [],
+        "uncertainties": [f"LLM call failed: {type(exc).__name__}"],
+    }
 
 # ==================================================
 # FINAL CONCLUSION (FORCED CONSISTENCY)
