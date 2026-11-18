@@ -99,9 +99,9 @@ if fps == 0:
     fps = 25
 
 MAX_SECONDS = 20
-MAX_FRAMES = int(fps * MAX_SECONDS)
+MAX_FRAMES = min(int(fps * MAX_SECONDS), 540)
 frame_counter = 0
-SAMPLE_INTERVAL_SECONDS = 1.0
+SAMPLE_INTERVAL_SECONDS = 5.0
 next_sample_time = 0.0
 sampled_frames = []
 

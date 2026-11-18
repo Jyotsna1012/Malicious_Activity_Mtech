@@ -16,7 +16,7 @@ st.set_page_config(page_title="Video Activity Analysis", page_icon="🎥")
 st.title("Video Activity Analysis")
 st.write(
     "Upload a video to generate an annotated version. The processor analyzes "
-    "up to the first 20 seconds."
+    "up to the first 540 frames."
 )
 st.caption("OpenAI API key is read from Streamlit secrets.")
 
