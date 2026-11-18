@@ -7,6 +7,7 @@ from pathlib import Path
 
 import streamlit as st
 
+API_KEY = st.secrets["API_KEY"]
 
 BASE_DIR = Path(__file__).resolve().parent
 PROCESSOR = BASE_DIR / "main.py"
@@ -17,13 +18,7 @@ st.write(
     "Upload a video to generate an annotated version. The processor analyzes "
     "up to the first 20 seconds."
 )
-config_path = Path(os.environ.get("APP_CONFIG_FILE", BASE_DIR / "config.json"))
-st.caption(f"OpenAI API key is read from the server config file: {config_path}")
-if not config_path.is_file():
-    st.info(
-        "On this machine, create config.json by copying config.example.json, "
-        "then replace the sample value with your API key."
-    )
+st.caption("OpenAI API key is read from Streamlit secrets.")
 
 uploaded_video = st.file_uploader(
     "Choose a video file",
@@ -38,10 +33,6 @@ if uploaded_video and st.button("Process video", type="primary"):
     try:
         if not PROCESSOR.is_file():
             raise FileNotFoundError(f"Could not find the video processor: {PROCESSOR}")
-        if not config_path.is_file():
-            raise FileNotFoundError(
-                f"Config file not found: {config_path}. Create it from config.example.json."
-            )
 
         suffix = Path(uploaded_video.name).suffix or ".mp4"
         with tempfile.TemporaryDirectory(prefix="video_analysis_") as temp_dir:
@@ -50,7 +41,7 @@ if uploaded_video and st.button("Process video", type="primary"):
             input_path.write_bytes(uploaded_video.getbuffer())
 
             process_env = os.environ.copy()
-            process_env["APP_CONFIG_FILE"] = str(config_path)
+            process_env["OPENAI_API_KEY"] = API_KEY
             command = [
                 sys.executable,
                 str(PROCESSOR),

@@ -15,20 +15,24 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 CONFIG_PATH = os.environ.get(
     "APP_CONFIG_FILE", os.path.join(BASE_DIR, "config.json")
 )
-try:
-    with open(CONFIG_PATH, "r", encoding="utf-8") as config_file:
-        app_config = json.load(config_file)
-except FileNotFoundError as exc:
-    raise FileNotFoundError(
-        f"Config file not found: {CONFIG_PATH}. Create it from config.example.json "
-        "and set OPENAI_API_KEY."
-    ) from exc
-except json.JSONDecodeError as exc:
-    raise ValueError(f"Invalid JSON in config file: {CONFIG_PATH}") from exc
 
-OPENAI_API_KEY = str(app_config.get("OPENAI_API_KEY", "")).strip()
+OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "").strip()
+
+app_config = {}
+if os.path.isfile(CONFIG_PATH):
+    try:
+        with open(CONFIG_PATH, "r", encoding="utf-8") as config_file:
+            app_config = json.load(config_file)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"Invalid JSON in config file: {CONFIG_PATH}") from exc
+
 if not OPENAI_API_KEY:
-    raise ValueError(f"Set OPENAI_API_KEY in the config file: {CONFIG_PATH}")
+    OPENAI_API_KEY = str(app_config.get("OPENAI_API_KEY", "")).strip()
+if not OPENAI_API_KEY:
+    raise ValueError(
+        "Set OPENAI_API_KEY via the OPENAI_API_KEY environment variable "
+        f"or in the config file: {CONFIG_PATH}"
+    )
 
 # ==================================================
 # INITIALIZE MODELS
