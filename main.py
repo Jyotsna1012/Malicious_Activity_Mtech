@@ -483,7 +483,7 @@ if "video_writer" in globals():
 if show_preview:
     cv2.destroyAllWindows()
 
-# mp4v (MPEG-4 Part 2) is not playable in browsers; transcode to H.264.
+# Encode a browser-compatible H.264 MP4 before the app exposes the video.
 h264_path = os.path.splitext(output_video_path)[0] + "_h264.mp4"
 try:
     import imageio_ffmpeg
@@ -494,23 +494,30 @@ try:
             "-y",
             "-i", output_video_path,
             "-c:v", "libx264",
+            "-profile:v", "baseline",
             "-pix_fmt", "yuv420p",
             "-movflags", "+faststart",
+            "-an",
+            "-f", "mp4",
             "-loglevel", "error",
             h264_path,
         ],
         check=True,
         capture_output=True,
     )
+    if not os.path.isfile(h264_path) or os.path.getsize(h264_path) == 0:
+        raise RuntimeError("FFmpeg produced an empty H.264 video.")
     os.replace(h264_path, output_video_path)
     print("Video transcoded to H.264 for browser playback.", flush=True)
 except Exception as exc:
-    print(f"H.264 transcode skipped: {type(exc).__name__}: {exc}", flush=True)
     if os.path.exists(h264_path):
         try:
             os.remove(h264_path)
         except OSError:
             pass
+    raise RuntimeError(
+        f"Could not encode the annotated video for browser playback: {exc}"
+    ) from exc
 
 print(f"Annotated video saved to: {output_video_path}", flush=True)
 
