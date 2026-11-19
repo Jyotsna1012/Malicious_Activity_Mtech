@@ -548,6 +548,7 @@ except Exception as exc:
 # FINAL CONCLUSION (FORCED CONSISTENCY)
 # ==================================================
 max_threat = max(threat_score_log)
+malicious_activity_percent = round(float(np.mean(threat_score_log)))
 idx = threat_score_log.index(max_threat)
 
 final_fight_type = fight_type_log[idx]
@@ -568,6 +569,7 @@ print(f"Dominant Action           : {action_log[idx]}")
 print(f"Dominant Emotion          : {emotion_log[idx]}")
 print(f"Final Fight Type          : {final_fight_type}")
 print(f"Threat Score (Max)        : {max_threat} / 100")
+print(f"Malicious Activity Score: {malicious_activity_percent}%")
 print("-----------------------------------------------------")
 print("LOGIC APPLIED             : Multi-person evaluation")
 print("REASON                    : Action + Emotion based")

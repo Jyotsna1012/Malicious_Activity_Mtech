@@ -1,6 +1,7 @@
 import base64
 import hashlib
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -11,7 +12,7 @@ import streamlit as st
 import streamlit.components.v1 as components
 
 API_KEY = st.secrets["API_KEY"]
-PROCESSOR_VERSION = 2
+PROCESSOR_VERSION = 3
 
 BASE_DIR = Path(__file__).resolve().parent
 PROCESSOR = BASE_DIR / "main.py"
@@ -45,6 +46,7 @@ if uploaded_video and st.button("Process video", type="primary"):
     result = None
     video_bytes = None
     processor_output = ""
+    malicious_activity_percent = None
     upload_id = hashlib.sha256(uploaded_video.getbuffer()).hexdigest()
 
     try:
@@ -80,6 +82,13 @@ if uploaded_video and st.button("Process video", type="primary"):
             processor_output = "\n".join(
                 part for part in (result.stdout, result.stderr) if part
             )
+            score_match = re.search(
+                r"Malicious Activity Score\s*:\s*(\d+(?:\.\d+)?)%",
+                processor_output,
+                re.IGNORECASE,
+            )
+            if score_match:
+                malicious_activity_percent = float(score_match.group(1))
             if output_path.is_file() and output_path.stat().st_size > 0:
                 video_bytes = output_path.read_bytes()
     except subprocess.TimeoutExpired as exc:
@@ -99,6 +108,7 @@ if uploaded_video and st.button("Process video", type="primary"):
         "upload_name": uploaded_video.name,
         "upload_id": upload_id,
         "processor_version": PROCESSOR_VERSION,
+        "malicious_activity_percent": malicious_activity_percent,
     }
 
 
@@ -108,42 +118,54 @@ if video_result and uploaded_video and video_result.get("upload_id") == upload_i
     if result_video:
         st.success("Processed video is ready to play. Use the video controls to replay it anytime.")
         video_data = base64.b64encode(result_video).decode("ascii")
-        components.html(
-            """
-            <video id="processed-video" controls playsinline preload="metadata"
-                   style="display:block;width:100%;max-height:70vh;background:#111">
-              <source src="data:video/mp4;base64,__VIDEO_DATA__" type="video/mp4">
-            </video>
-            <div id="playback-status" role="status" aria-live="polite"
-                 style="font:14px sans-serif;padding:8px 0;color:#555">
-              Loading video metadata...
-            </div>
-            <script>
-              const player = document.getElementById("processed-video");
-              const status = document.getElementById("playback-status");
-              const mediaErrors = {
-                1: "Playback was cancelled.",
-                2: "The browser had a network error while loading the video.",
-                3: "The browser could not decode this video. Its codec or file data may be invalid.",
-                4: "The browser does not support this video format or codec."
-              };
-              player.addEventListener("loadedmetadata", () => {
-                status.textContent = `Video loaded (${player.videoWidth}x${player.videoHeight}, ` +
-                  `${Number.isFinite(player.duration) ? player.duration.toFixed(1) + " s" : "duration unknown"}).`;
-              });
-              player.addEventListener("error", () => {
-                const error = player.error;
-                const code = error ? error.code : 0;
-                status.textContent = `Playback error${code ? ` (code ${code})` : ""}: ` +
-                  `${mediaErrors[code] || "The browser could not load the processed video."}` +
-                  `${error && error.message ? ` Details: ${error.message}` : ""}`;
-                status.style.color = "#b00020";
-              });
-            </script>
-            """.replace("__VIDEO_DATA__", video_data),
-            height=500,
-            scrolling=False,
-        )
+        video_column, score_column = st.columns([3, 1])
+        with video_column:
+            components.html(
+                """
+                <video id="processed-video" controls playsinline preload="metadata"
+                       style="display:block;width:100%;max-height:70vh;background:#111">
+                  <source src="data:video/mp4;base64,__VIDEO_DATA__" type="video/mp4">
+                </video>
+                <div id="playback-status" role="status" aria-live="polite"
+                     style="font:14px sans-serif;padding:8px 0;color:#555">
+                  Loading video metadata...
+                </div>
+                <script>
+                  const player = document.getElementById("processed-video");
+                  const status = document.getElementById("playback-status");
+                  const mediaErrors = {
+                    1: "Playback was cancelled.",
+                    2: "The browser had a network error while loading the video.",
+                    3: "The browser could not decode this video. Its codec or file data may be invalid.",
+                    4: "The browser does not support this video format or codec."
+                  };
+                  player.addEventListener("loadedmetadata", () => {
+                    status.textContent = `Video loaded (${player.videoWidth}x${player.videoHeight}, ` +
+                      `${Number.isFinite(player.duration) ? player.duration.toFixed(1) + " s" : "duration unknown"}).`;
+                  });
+                  player.addEventListener("error", () => {
+                    const error = player.error;
+                    const code = error ? error.code : 0;
+                    status.textContent = `Playback error${code ? ` (code ${code})` : ""}: ` +
+                      `${mediaErrors[code] || "The browser could not load the processed video."}` +
+                      `${error && error.message ? ` Details: ${error.message}` : ""}`;
+                    status.style.color = "#b00020";
+                  });
+                </script>
+                """.replace("__VIDEO_DATA__", video_data),
+                height=500,
+                scrolling=False,
+            )
+        with score_column:
+            score = video_result.get("malicious_activity_percent")
+            st.metric(
+                "Estimated malicious activity",
+                f"{score:.0f}%" if score is not None else "Unavailable",
+            )
+            st.caption(
+                "Average heuristic score from detected actions/posture and emotions. "
+                "This is not a probability or judgment of intent."
+            )
 
     if video_result["processor_output"]:
         with st.expander("Processing log", expanded=False):
