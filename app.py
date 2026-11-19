@@ -1,3 +1,4 @@
+import base64
 import hashlib
 import os
 import subprocess
@@ -7,6 +8,7 @@ import traceback
 from pathlib import Path
 
 import streamlit as st
+import streamlit.components.v1 as components
 
 API_KEY = st.secrets["API_KEY"]
 PROCESSOR_VERSION = 2
@@ -105,7 +107,47 @@ if video_result and uploaded_video and video_result.get("upload_id") == upload_i
     result_video = video_result["video_bytes"]
     if result_video:
         st.success("Processed video is ready to play. Use the video controls to replay it anytime.")
-        st.video(result_video, format="video/mp4")
+        video_data = base64.b64encode(result_video).decode("ascii")
+        components.html(
+            """
+            <video id="processed-video" controls playsinline preload="metadata"
+                   style="display:block;width:100%;max-height:70vh;background:#111">
+              <source src="data:video/mp4;base64,__VIDEO_DATA__" type="video/mp4">
+            </video>
+            <div id="playback-status" role="status" aria-live="polite"
+                 style="font:14px sans-serif;padding:8px 0;color:#555">
+              Loading video metadata...
+            </div>
+            <script>
+              const player = document.getElementById("processed-video");
+              const status = document.getElementById("playback-status");
+              const mediaErrors = {
+                1: "Playback was cancelled.",
+                2: "The browser had a network error while loading the video.",
+                3: "The browser could not decode this video. Its codec or file data may be invalid.",
+                4: "The browser does not support this video format or codec."
+              };
+              player.addEventListener("loadedmetadata", () => {
+                status.textContent = `Video loaded (${player.videoWidth}x${player.videoHeight}, ` +
+                  `${Number.isFinite(player.duration) ? player.duration.toFixed(1) + " s" : "duration unknown"}).`;
+              });
+              player.addEventListener("error", () => {
+                const error = player.error;
+                const code = error ? error.code : 0;
+                status.textContent = `Playback error${code ? ` (code ${code})` : ""}: ` +
+                  `${mediaErrors[code] || "The browser could not load the processed video."}` +
+                  `${error && error.message ? ` Details: ${error.message}` : ""}`;
+                status.style.color = "#b00020";
+              });
+            </script>
+            """.replace("__VIDEO_DATA__", video_data),
+            height=500,
+            scrolling=False,
+        )
+
+    if video_result["processor_output"]:
+        with st.expander("Processing log", expanded=False):
+            st.code(video_result["processor_output"][-20000:])
 
     returncode = video_result["returncode"]
     if returncode is not None and returncode != 0:
