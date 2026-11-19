@@ -105,6 +105,7 @@ frame_counter = 0
 SAMPLE_INTERVAL_SECONDS = 1.0
 next_sample_time = 0.0
 sampled_frames = []
+sampled_frame_signals = []
 
 # ==================================================
 # GLOBAL VARIABLES
@@ -244,10 +245,11 @@ def analyze_video_with_llm(frames, signals):
             "computer-vision summaries. Classify only observable events, not a person's "
             "intent, character, or guilt. Do not infer aggression from facial emotion alone. "
             "For every supplied frame, return exactly one concise but specific observation "
-            "in chronological order. Describe visible people, posture, movement, relative "
-            "positions, and any clearly visible physical interaction; say when a detail is "
-            "unclear instead of guessing. Then provide an overall chronological summary of "
-            "what is visible across the clip. Do not omit supplied frames. "
+            "of at most 25 words, in chronological order. Describe visible people, posture, "
+            "movement, relative positions, and clearly visible physical interaction; say "
+            "when a detail is unclear instead of guessing. Treat local computer-vision cues "
+            "as fallible hints and describe only what the image supports. Then provide a "
+            "clear overall summary in 2 to 4 sentences. Do not omit supplied frames. "
             "Use POSSIBLE_PHYSICAL_AGGRESSION only when visible physical interaction supports "
             "it; use FALL_OR_DISTRESS for a visible fall or apparent distress; use "
             "NO_CLEAR_PHYSICAL_AGGRESSION when evidence does not support aggression; use "
@@ -257,13 +259,21 @@ def analyze_video_with_llm(frames, signals):
             f"Sampled frames: {len(frames)}.\n"
             f"Aggregated action labels: {json.dumps(signals['actions'])}.\n"
             f"Aggregated emotion labels: {json.dumps(signals['emotions'])}.\n"
-            f"Observed face counts: {json.dumps(signals['face_counts'])}."
+            f"Observed face counts: {json.dumps(signals['face_counts'])}.\n"
+            "Per-frame computer-vision cues follow with each corresponding image."
         ),
     }]
-    for timestamp, image_data in frames:
+    for frame_index, (timestamp, image_data) in enumerate(frames):
+        frame_cue_text = ""
+        if frame_index < len(signals.get("frame_cues", [])):
+            cue = signals["frame_cues"][frame_index]
+            frame_cue_text = (
+                f" Local CV cues: action={cue['action']}; emotion={cue['emotion']}; "
+                f"estimated people={cue['people_count']}; risk={cue['risk']}."
+            )
         content.append({
             "type": "input_text",
-            "text": f"Frame at {timestamp:.1f} seconds:",
+            "text": f"Frame at {timestamp:.1f} seconds.{frame_cue_text}",
         })
         content.append({
             "type": "input_image",
@@ -307,7 +317,7 @@ def analyze_video_with_llm(frames, signals):
         "additionalProperties": False,
     }
     response = client.responses.create(
-        model=os.getenv("OPENAI_MODEL", "gpt-6.1-terra"),
+        model=os.getenv("OPENAI_MODEL", "gpt-6-luna"),
         input=[{"role": "user", "content": content}],
         text={
             "format": {
@@ -317,9 +327,17 @@ def analyze_video_with_llm(frames, signals):
                 "schema": schema,
             }
         },
+        reasoning={"effort": "low"},
+        max_output_tokens=4000,
         store=False,
     )
-    return json.loads(response.output_text)
+    assessment = json.loads(response.output_text)
+    usage = getattr(response, "usage", None)
+    assessment["api_usage"] = {
+        "input_tokens": getattr(usage, "input_tokens", None),
+        "output_tokens": getattr(usage, "output_tokens", None),
+    }
+    return assessment
 
 # ==================================================
 # MAIN LOOP
@@ -338,6 +356,7 @@ while cap.isOpened() and frame_counter < MAX_FRAMES:
     video_time = cap.get(cv2.CAP_PROP_POS_MSEC) / 1000.0
     if video_time <= 0:
         video_time = frame_counter / fps
+    sampled_image_data = None
     if video_time >= next_sample_time:
         sample = frame
         sample_height, sample_width = sample.shape[:2]
@@ -348,10 +367,7 @@ while cap.isOpened() and frame_counter < MAX_FRAMES:
             ".jpg", sample, [cv2.IMWRITE_JPEG_QUALITY, 75]
         )
         if encoded_ok:
-            sampled_frames.append((
-                video_time,
-                base64.b64encode(encoded_frame).decode("ascii"),
-            ))
+            sampled_image_data = base64.b64encode(encoded_frame).decode("ascii")
         next_sample_time = video_time + SAMPLE_INTERVAL_SECONDS
 
     h, w, _ = frame.shape
@@ -428,6 +444,15 @@ while cap.isOpened() and frame_counter < MAX_FRAMES:
     fight_type_log.append(fight_type)
     person_count_log.append(person_count)
     face_count_log.append(face_count)
+
+    if sampled_image_data is not None:
+        sampled_frames.append((video_time, sampled_image_data))
+        sampled_frame_signals.append({
+            "action": ACTION_LABEL,
+            "emotion": dominant_emotion,
+            "people_count": person_count,
+            "risk": risk,
+        })
 
     # Larger labels remain readable in both the output video and smaller preview.
     overlay_font = max(0.65, min(1.0, frame.shape[1] / 900.0))
@@ -552,6 +577,7 @@ try:
             "actions": dict(Counter(action_log)),
             "emotions": dict(Counter(emotion_log)),
             "face_counts": dict(Counter(face_count_log)),
+            "frame_cues": sampled_frame_signals,
         },
     )
 except Exception as exc:
@@ -622,6 +648,8 @@ print("FRAME_SUMMARIES_JSON: " + json.dumps(
 print("VIDEO_SUMMARY_JSON: " + json.dumps(
     llm_assessment["summary"], ensure_ascii=False
 ))
+if llm_assessment.get("api_usage"):
+    print("VISION_USAGE_JSON: " + json.dumps(llm_assessment["api_usage"]))
 print("-----------------------------------------------------")
 print("LOGIC APPLIED             : Multi-person evaluation")
 print("REASON                    : Action + Emotion based")

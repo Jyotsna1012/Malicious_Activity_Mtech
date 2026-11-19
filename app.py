@@ -13,7 +13,7 @@ import streamlit as st
 import streamlit.components.v1 as components
 
 API_KEY = st.secrets["API_KEY"]
-PROCESSOR_VERSION = 6
+PROCESSOR_VERSION = 7
 
 BASE_DIR = Path(__file__).resolve().parent
 PROCESSOR = BASE_DIR / "main.py"
@@ -54,6 +54,7 @@ if uploaded_video and st.button("Process video", type="primary"):
     vision_error = None
     frame_summaries = []
     video_summary = None
+    api_usage = None
     upload_id = hashlib.sha256(uploaded_video.getbuffer()).hexdigest()
 
     try:
@@ -147,6 +148,16 @@ if uploaded_video and st.button("Process video", type="primary"):
                     video_summary = json.loads(video_summary_match.group(1))
                 except json.JSONDecodeError:
                     video_summary = None
+            usage_match = re.search(
+                r"^VISION_USAGE_JSON:\s*(.+)$",
+                processor_output,
+                re.MULTILINE,
+            )
+            if usage_match:
+                try:
+                    api_usage = json.loads(usage_match.group(1))
+                except json.JSONDecodeError:
+                    api_usage = None
             if output_path.is_file() and output_path.stat().st_size > 0:
                 video_bytes = output_path.read_bytes()
     except subprocess.TimeoutExpired as exc:
@@ -173,6 +184,7 @@ if uploaded_video and st.button("Process video", type="primary"):
         "vision_error": vision_error,
         "frame_summaries": frame_summaries,
         "video_summary": video_summary,
+        "api_usage": api_usage,
     }
 
 
@@ -246,6 +258,12 @@ if video_result and uploaded_video and video_result.get("upload_id") == upload_i
                 st.caption(
                     "The displayed estimate takes the stronger frame cue or vision signal. "
                     "It is not a probability or judgment of intent."
+                )
+            usage = video_result.get("api_usage")
+            if usage and usage.get("input_tokens") is not None:
+                st.caption(
+                    f"Vision API usage: {usage['input_tokens']:,} input tokens, "
+                    f"{usage.get('output_tokens') or 0:,} output tokens."
                 )
 
         if video_result.get("vision_error"):
