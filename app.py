@@ -13,7 +13,7 @@ import streamlit as st
 import streamlit.components.v1 as components
 
 API_KEY = st.secrets["API_KEY"]
-PROCESSOR_VERSION = 8
+PROCESSOR_VERSION = 9
 
 BASE_DIR = Path(__file__).resolve().parent
 PROCESSOR = BASE_DIR / "main.py"
@@ -279,7 +279,7 @@ if video_result and uploaded_video and video_result.get("upload_id") == upload_i
                 st.markdown("**Summary source: LOCAL COMPUTER VISION ONLY (not an LLM response)**")
                 st.caption(
                     f"One local-cue line per processed frame ({len(summaries)} frames). "
-                    "Pose, emotion, people-count, and risk labels are estimates."
+                    "These movement cues do not identify a fight or determine intent."
                 )
             else:
                 st.markdown("**Summary source: OpenAI vision analysis**")

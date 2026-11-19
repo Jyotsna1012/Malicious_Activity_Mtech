@@ -110,9 +110,7 @@ sampled_frame_signals = []
 # ==================================================
 # GLOBAL VARIABLES
 # ==================================================
-prev_center = None
-prev_height = None
-ACTION_LABEL = "Normal"
+previous_pose = None
 
 risk_log = []
 threat_score_log = []
@@ -132,36 +130,73 @@ def lm_xy(landmarks, idx, w, h):
 # --------------------------------------------------
 # ACTION DETECTION
 # --------------------------------------------------
-def detect_action(landmarks, prev_center, prev_height, w, h):
-    head = lm_xy(landmarks, 0, w, h)
-    l_hand = lm_xy(landmarks, 15, w, h)
-    r_hand = lm_xy(landmarks, 16, w, h)
-    l_foot = lm_xy(landmarks, 27, w, h)
-    r_foot = lm_xy(landmarks, 28, w, h)
+def detect_action(landmarks, previous_pose, w, h, timestamp, fps):
+    """Describe pose and motion cues using body-relative, time-normalized measures."""
+    required = (11, 12, 23, 24, 27, 28)
+    if any(getattr(landmarks[index], "visibility", 1.0) < 0.35 for index in required):
+        return "Pose incomplete", None
 
-    center = (head + l_foot + r_foot) / 3
-    height = abs(head[1] - max(l_foot[1], r_foot[1]))
-    width = abs(l_foot[0] - r_foot[0])
+    left_shoulder = lm_xy(landmarks, 11, w, h)
+    right_shoulder = lm_xy(landmarks, 12, w, h)
+    left_hip = lm_xy(landmarks, 23, w, h)
+    right_hip = lm_xy(landmarks, 24, w, h)
+    left_ankle = lm_xy(landmarks, 27, w, h)
+    right_ankle = lm_xy(landmarks, 28, w, h)
+    shoulders = (left_shoulder + right_shoulder) / 2
+    hips = (left_hip + right_hip) / 2
+    ankles = (left_ankle + right_ankle) / 2
+    center = (shoulders + hips + ankles) / 3
+    body_scale = max(
+        float(np.linalg.norm(shoulders - hips)
+              + (np.linalg.norm(left_hip - left_ankle)
+                 + np.linalg.norm(right_hip - right_ankle)) / 2),
+        min(w, h) * 0.08,
+    )
 
-    if prev_height is not None and (prev_height - height) > 90:
-        return "Fall Detected", center, height
+    torso_delta = shoulders - hips
+    horizontal_torso = abs(torso_delta[0]) > 1.4 * max(abs(torso_delta[1]), 1.0)
+    left_wrist = lm_xy(landmarks, 15, w, h)
+    right_wrist = lm_xy(landmarks, 16, w, h)
+    current_pose = {
+        "time": timestamp,
+        "center": center,
+        "body_scale": body_scale,
+        "left_wrist": left_wrist,
+        "right_wrist": right_wrist,
+        "left_wrist_visible": getattr(landmarks[15], "visibility", 1.0) >= 0.4,
+        "right_wrist_visible": getattr(landmarks[16], "visibility", 1.0) >= 0.4,
+        "horizontal_torso": horizontal_torso,
+    }
 
-    speed = 0
-    if prev_center is not None:
-        speed = np.linalg.norm(center - prev_center)
-        if speed > 45:
-            return "Running", center, height
+    if previous_pose is None:
+        return "Stable / no strong movement cue", current_pose
 
-    hand_span = np.linalg.norm(l_hand - r_hand)
-    foot_span = np.linalg.norm(l_foot - r_foot)
+    elapsed = timestamp - previous_pose["time"]
+    if elapsed <= 0 or elapsed > 0.75:
+        return "Stable / no strong movement cue", current_pose
 
-    if speed > 25 and (hand_span > 120 or foot_span > 140):
-        return "Fight / Attack", center, height
+    scale = max(body_scale, previous_pose["body_scale"])
+    body_speed = float(np.linalg.norm(center - previous_pose["center"])) / scale / elapsed
+    arm_speeds = []
+    for key in ("left_wrist", "right_wrist"):
+        visible_key = f"{key}_visible"
+        wrist_speed = float(np.linalg.norm(current_pose[key] - previous_pose[key])) / scale / elapsed
+        if current_pose[visible_key] and previous_pose[visible_key]:
+            arm_speeds.append(wrist_speed)
+    arm_speed = max(arm_speeds, default=0.0)
 
-    if height < width * 0.6:
-        return "Sleeping / Fallen", center, height
-
-    return "Normal", center, height
+    downward_shift = (center[1] - previous_pose["center"][1]) / scale
+    if horizontal_torso and downward_shift > 0.18:
+        return "Possible fall / horizontal posture", current_pose
+    if horizontal_torso:
+        return "Horizontal torso posture", current_pose
+    if arm_speed > 2.5:
+        return "Rapid arm movement", current_pose
+    if body_speed > 1.5:
+        return "Fast body movement", current_pose
+    if body_speed > 0.4:
+        return "Body movement", current_pose
+    return "Stable / no strong movement cue", current_pose
 
 # --------------------------------------------------
 # PEOPLE ESTIMATION
@@ -184,10 +219,10 @@ def estimate_people_count(frame):
 # --------------------------------------------------
 def classify_fight_type(action, emotion, person_count):
     # print(f"{action}  {emotion}  {person_count}")
-    if action == "Sleeping / Fallen":
+    if action == "Possible fall / horizontal posture":
         return "Fallen"
     if action != "Fight / Attack":
-        return "NO_FIGHT"
+        return "UNCLASSIFIED_FROM_LOCAL_POSE_CUES"
     if person_count == 1:
         return "SELF_PRACTICE"
     if person_count < 1:
@@ -205,19 +240,18 @@ def classify_fight_type(action, emotion, person_count):
 def assess_risk_and_score(fight_type, action, emotion, person_count):
     score = 0
 
-    if action == "Fight / Attack":
-        score += 25
+    if action == "Rapid arm movement":
+        score += 15
+    if action == "Fast body movement":
+        score += 10
+    if action == "Possible fall / horizontal posture":
+        score += 20
+    if action == "Horizontal torso posture":
+        score += 10
     if emotion in ["anger", "fear", "sad"]:
         score += 10
     if person_count >= 2:
         score += 20
-    if action == "Running" and emotion in ["anger", "fear", "sad"]:
-        score += 10
-    if action in ["Sleeping / Fallen"]:
-        score += 40
-    if action in ["Fall Detected"]:
-        score += 10    
-
     score = min(score, 100)
 
     if score >= 70:
@@ -370,13 +404,16 @@ while cap.isOpened() and frame_counter < MAX_FRAMES:
 
     frame_action_label = "Pose not detected"
     if results.pose_landmarks:
-        ACTION_LABEL, prev_center, prev_height = detect_action(
-            results.pose_landmarks.landmark, prev_center, prev_height, w, h
+        frame_action_label, previous_pose = detect_action(
+            results.pose_landmarks.landmark,
+            previous_pose,
+            w,
+            h,
+            video_time,
+            fps,
         )
-        frame_action_label = ACTION_LABEL
     else:
-        prev_center = None
-        prev_height = None
+        previous_pose = None
 
     rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
     face_results = face_detector.process(rgb_frame)
@@ -632,8 +669,8 @@ except Exception as exc:
         f"{local_action_summary}. Facial-emotion labels on frames with detected faces: "
         f"{local_emotion_summary}. Heuristic risk labels: {local_risk_summary}. "
         f"A face was detected on {local_face_detection_frames}/{total_local_frames} frames. "
-        "These are local model estimates, not an OpenAI visual assessment or a finding "
-        "of intent."
+        "These are local pose and face-model cues, not a trained fight-recognition "
+        "model, an OpenAI visual assessment, or a finding of intent."
     )
     llm_assessment["summary_source"] = "LOCAL_CV"
     llm_assessment["frame_summaries"] = [
