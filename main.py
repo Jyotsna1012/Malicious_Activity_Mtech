@@ -243,6 +243,11 @@ def analyze_video_with_llm(frames, signals):
             "Review these chronologically ordered video frames and the accompanying "
             "computer-vision summaries. Classify only observable events, not a person's "
             "intent, character, or guilt. Do not infer aggression from facial emotion alone. "
+            "For every supplied frame, return exactly one concise but specific observation "
+            "in chronological order. Describe visible people, posture, movement, relative "
+            "positions, and any clearly visible physical interaction; say when a detail is "
+            "unclear instead of guessing. Then provide an overall chronological summary of "
+            "what is visible across the clip. Do not omit supplied frames. "
             "Use POSSIBLE_PHYSICAL_AGGRESSION only when visible physical interaction supports "
             "it; use FALL_OR_DISTRESS for a visible fall or apparent distress; use "
             "NO_CLEAR_PHYSICAL_AGGRESSION when evidence does not support aggression; use "
@@ -280,10 +285,25 @@ def analyze_video_with_llm(frames, signals):
             },
             "confidence": {"type": "number", "minimum": 0, "maximum": 1},
             "summary": {"type": "string"},
+            "frame_summaries": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "timestamp_seconds": {"type": "number", "minimum": 0},
+                        "observation": {"type": "string"},
+                    },
+                    "required": ["timestamp_seconds", "observation"],
+                    "additionalProperties": False,
+                },
+            },
             "evidence": {"type": "array", "items": {"type": "string"}},
             "uncertainties": {"type": "array", "items": {"type": "string"}},
         },
-        "required": ["assessment", "confidence", "summary", "evidence", "uncertainties"],
+        "required": [
+            "assessment", "confidence", "summary", "frame_summaries",
+            "evidence", "uncertainties",
+        ],
         "additionalProperties": False,
     }
     response = client.responses.create(
@@ -540,6 +560,7 @@ except Exception as exc:
         "assessment": "UNCLEAR",
         "confidence": 0.0,
         "summary": "LLM assessment unavailable; heuristic analysis only.",
+        "frame_summaries": [],
         "evidence": [],
         "uncertainties": [f"LLM call failed: {type(exc).__name__}"],
     }
@@ -577,6 +598,12 @@ print(f"Frame Activity Score: {frame_activity_score}%")
 print(f"Vision Assessment: {llm_assessment['assessment']}")
 print(f"Vision Confidence: {llm_assessment['confidence']:.0%}")
 print(f"Malicious Activity Score: {malicious_activity_percent}%")
+print("FRAME_SUMMARIES_JSON: " + json.dumps(
+    llm_assessment.get("frame_summaries", []), ensure_ascii=False
+))
+print("VIDEO_SUMMARY_JSON: " + json.dumps(
+    llm_assessment["summary"], ensure_ascii=False
+))
 print("-----------------------------------------------------")
 print("LOGIC APPLIED             : Multi-person evaluation")
 print("REASON                    : Action + Emotion based")

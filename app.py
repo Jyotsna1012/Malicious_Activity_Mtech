@@ -1,5 +1,6 @@
 import base64
 import hashlib
+import json
 import os
 import re
 import subprocess
@@ -12,7 +13,7 @@ import streamlit as st
 import streamlit.components.v1 as components
 
 API_KEY = st.secrets["API_KEY"]
-PROCESSOR_VERSION = 4
+PROCESSOR_VERSION = 5
 
 BASE_DIR = Path(__file__).resolve().parent
 PROCESSOR = BASE_DIR / "main.py"
@@ -50,6 +51,8 @@ if uploaded_video and st.button("Process video", type="primary"):
     frame_activity_score = None
     vision_assessment = None
     vision_confidence = None
+    frame_summaries = []
+    video_summary = None
     upload_id = hashlib.sha256(uploaded_video.getbuffer()).hexdigest()
 
     try:
@@ -113,6 +116,26 @@ if uploaded_video and st.button("Process video", type="primary"):
             )
             if confidence_match:
                 vision_confidence = float(confidence_match.group(1))
+            frame_summaries_match = re.search(
+                r"^FRAME_SUMMARIES_JSON:\s*(.+)$",
+                processor_output,
+                re.MULTILINE,
+            )
+            if frame_summaries_match:
+                try:
+                    frame_summaries = json.loads(frame_summaries_match.group(1))
+                except json.JSONDecodeError:
+                    frame_summaries = []
+            video_summary_match = re.search(
+                r"^VIDEO_SUMMARY_JSON:\s*(.+)$",
+                processor_output,
+                re.MULTILINE,
+            )
+            if video_summary_match:
+                try:
+                    video_summary = json.loads(video_summary_match.group(1))
+                except json.JSONDecodeError:
+                    video_summary = None
             if output_path.is_file() and output_path.stat().st_size > 0:
                 video_bytes = output_path.read_bytes()
     except subprocess.TimeoutExpired as exc:
@@ -136,6 +159,8 @@ if uploaded_video and st.button("Process video", type="primary"):
         "frame_activity_score": frame_activity_score,
         "vision_assessment": vision_assessment,
         "vision_confidence": vision_confidence,
+        "frame_summaries": frame_summaries,
+        "video_summary": video_summary,
     }
 
 
@@ -197,6 +222,28 @@ if video_result and uploaded_video and video_result.get("upload_id") == upload_i
             st.caption(
                 "The displayed estimate takes the stronger frame cue or vision signal. "
                 "It is not a probability or judgment of intent."
+            )
+
+        with st.expander("Frame-by-frame details and overall summary", expanded=True):
+            summaries = video_result.get("frame_summaries", [])
+            st.caption(
+                f"One line per sampled frame, currently sampled every second "
+                f"({len(summaries)} frames summarized)."
+            )
+            if summaries:
+                for index, frame_summary in enumerate(summaries, start=1):
+                    timestamp = float(frame_summary.get("timestamp_seconds", 0))
+                    observation = frame_summary.get("observation", "No observation returned.")
+                    st.markdown(f"**{index}. {timestamp:.1f}s** — {observation}")
+            else:
+                st.info(
+                    "Frame-by-frame details are unavailable. Check the processing log "
+                    "for the vision analysis error."
+                )
+            st.markdown("**Overall video summary**")
+            st.write(
+                video_result.get("video_summary")
+                or "An overall summary was not returned."
             )
 
     if video_result["processor_output"]:
