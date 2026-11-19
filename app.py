@@ -13,7 +13,7 @@ import streamlit as st
 import streamlit.components.v1 as components
 
 API_KEY = st.secrets["API_KEY"]
-PROCESSOR_VERSION = 7
+PROCESSOR_VERSION = 8
 
 BASE_DIR = Path(__file__).resolve().parent
 PROCESSOR = BASE_DIR / "main.py"
@@ -185,6 +185,7 @@ if uploaded_video and st.button("Process video", type="primary"):
         "frame_summaries": frame_summaries,
         "video_summary": video_summary,
         "api_usage": api_usage,
+        "summary_source": "LOCAL_CV" if vision_error else "LLM_VISION",
     }
 
 
@@ -268,15 +269,24 @@ if video_result and uploaded_video and video_result.get("upload_id") == upload_i
 
         if video_result.get("vision_error"):
             st.warning(
-                f"{video_result['vision_error']} [OpenAI API billing settings](https://platform.openai.com/settings/organization/billing/)."
+                f"LOCAL FINDINGS ONLY. {video_result['vision_error']} "
+                "[OpenAI API billing settings](https://platform.openai.com/settings/organization/billing/)."
             )
 
         with st.expander("Frame-by-frame details and overall summary", expanded=True):
             summaries = video_result.get("frame_summaries", [])
-            st.caption(
-                f"One line per sampled frame, currently sampled every second "
-                f"({len(summaries)} frames summarized)."
-            )
+            if video_result.get("summary_source") == "LOCAL_CV":
+                st.markdown("**Summary source: LOCAL COMPUTER VISION ONLY (not an LLM response)**")
+                st.caption(
+                    f"One local-cue line per processed frame ({len(summaries)} frames). "
+                    "Pose, emotion, people-count, and risk labels are estimates."
+                )
+            else:
+                st.markdown("**Summary source: OpenAI vision analysis**")
+                st.caption(
+                    f"One line per sampled frame, currently sampled every second "
+                    f"({len(summaries)} frames summarized)."
+                )
             if summaries:
                 for index, frame_summary in enumerate(summaries, start=1):
                     timestamp = float(frame_summary.get("timestamp_seconds", 0))

@@ -184,24 +184,19 @@ def estimate_people_count(frame):
 # --------------------------------------------------
 def classify_fight_type(action, emotion, person_count):
     # print(f"{action}  {emotion}  {person_count}")
+    if action == "Sleeping / Fallen":
+        return "Fallen"
     if action != "Fight / Attack":
-        if action == "Sleeping / Fallen":
-            return "Fallen"
-        elif person_count <= 1:
-            return "SELF_PRACTICE"  # SELF PRACTICE only if exactly ONE person   
-        else:
-            return "NO_FIGHT"
-    if action == "Fight / Attack" :
-        if person_count <= 1:
-            return "SELF_PRACTICE"
+        return "NO_FIGHT"
+    if person_count == 1:
+        return "SELF_PRACTICE"
+    if person_count < 1:
+        return "UNCLEAR"
         
 
     # Multiple persons → NEVER self practice
     if emotion in ["fear", "sad"]:
         return "PUNISHMENT"
-    if emotion == "anger":
-        return "ATTACK"
-
     return "ATTACK"
 
 # --------------------------------------------------
@@ -373,10 +368,15 @@ while cap.isOpened() and frame_counter < MAX_FRAMES:
     h, w, _ = frame.shape
     results = pose.process(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
 
+    frame_action_label = "Pose not detected"
     if results.pose_landmarks:
         ACTION_LABEL, prev_center, prev_height = detect_action(
             results.pose_landmarks.landmark, prev_center, prev_height, w, h
         )
+        frame_action_label = ACTION_LABEL
+    else:
+        prev_center = None
+        prev_height = None
 
     rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
     face_results = face_detector.process(rgb_frame)
@@ -432,15 +432,15 @@ while cap.isOpened() and frame_counter < MAX_FRAMES:
         # Prevent 1 person being counted as many
         person_count = min(motion_count, 1)
 
-    fight_type = classify_fight_type(ACTION_LABEL, dominant_emotion, person_count)
+    fight_type = classify_fight_type(frame_action_label, dominant_emotion, person_count)
     risk, threat_score = assess_risk_and_score(
-        fight_type, ACTION_LABEL, dominant_emotion, person_count
+        fight_type, frame_action_label, dominant_emotion, person_count
     )
 
     risk_log.append(risk)
     threat_score_log.append(threat_score)
     emotion_log.append(dominant_emotion)
-    action_log.append(ACTION_LABEL)
+    action_log.append(frame_action_label)
     fight_type_log.append(fight_type)
     person_count_log.append(person_count)
     face_count_log.append(face_count)
@@ -448,7 +448,7 @@ while cap.isOpened() and frame_counter < MAX_FRAMES:
     if sampled_image_data is not None:
         sampled_frames.append((video_time, sampled_image_data))
         sampled_frame_signals.append({
-            "action": ACTION_LABEL,
+            "action": frame_action_label,
             "emotion": dominant_emotion,
             "people_count": person_count,
             "risk": risk,
@@ -461,7 +461,7 @@ while cap.isOpened() and frame_counter < MAX_FRAMES:
     overlay_margin = int(12 * overlay_font)
     overlay_height = overlay_line_height * 4 + overlay_margin * 2
     cv2.rectangle(frame, (0, 0), (frame.shape[1], overlay_height), (0, 0, 0), -1)
-    cv2.putText(frame, f"Action: {ACTION_LABEL}", (overlay_margin, overlay_margin + overlay_line_height),
+    cv2.putText(frame, f"Action: {frame_action_label}", (overlay_margin, overlay_margin + overlay_line_height),
                 cv2.FONT_HERSHEY_SIMPLEX, overlay_font, (255,255,0), overlay_thickness)
     cv2.putText(frame, f"Emotion: {dominant_emotion}", (overlay_margin, overlay_margin + overlay_line_height * 2),
                 cv2.FONT_HERSHEY_SIMPLEX, overlay_font, (0,255,255), overlay_thickness)
@@ -601,8 +601,63 @@ except Exception as exc:
         "evidence": [],
         "uncertainties": [vision_error],
     }
+    total_local_frames = len(action_log)
+
+    def format_local_counts(counts, denominator, limit=4):
+        if denominator <= 0:
+            return "none"
+        return ", ".join(
+            f"{label}: {count}/{denominator} ({count / denominator:.1%})"
+            for label, count in counts.most_common(limit)
+        )
+
+    local_face_emotions = Counter(
+        emotion
+        for emotion, detected_faces in zip(emotion_log, face_count_log)
+        if detected_faces > 0
+    )
+    local_action_summary = format_local_counts(
+        Counter(action_log), total_local_frames
+    )
+    local_emotion_summary = format_local_counts(
+        local_face_emotions, sum(local_face_emotions.values())
+    )
+    local_risk_summary = format_local_counts(
+        Counter(risk_log), total_local_frames
+    )
+    local_face_detection_frames = sum(count > 0 for count in face_count_log)
+    llm_assessment["summary"] = (
+        f"Local computer-vision analysis processed {total_local_frames} frames "
+        f"({total_local_frames / fps:.1f} seconds). Pose-based action labels: "
+        f"{local_action_summary}. Facial-emotion labels on frames with detected faces: "
+        f"{local_emotion_summary}. Heuristic risk labels: {local_risk_summary}. "
+        f"A face was detected on {local_face_detection_frames}/{total_local_frames} frames. "
+        "These are local model estimates, not an OpenAI visual assessment or a finding "
+        "of intent."
+    )
+    llm_assessment["summary_source"] = "LOCAL_CV"
+    llm_assessment["frame_summaries"] = [
+        {
+            "timestamp_seconds": index / fps,
+            "observation": (
+                f"Local cues only: pose action={action}; "
+                f"face emotion={emotion if face_count > 0 else 'no face detected'}; "
+                f"estimated people={people}; detected faces={face_count}; "
+                f"heuristic risk={risk} ({score}/100)."
+            ),
+        }
+        for index, (action, emotion, people, face_count, risk, score) in enumerate(zip(
+            action_log,
+            emotion_log,
+            person_count_log,
+            face_count_log,
+            risk_log,
+            threat_score_log,
+        ))
+    ]
 else:
     vision_error = None
+    llm_assessment["summary_source"] = "LLM_VISION"
 
 # ==================================================
 # FINAL CONCLUSION (FORCED CONSISTENCY)
@@ -640,6 +695,7 @@ if llm_assessment["confidence"] is None:
 else:
     print(f"Vision Confidence: {llm_assessment['confidence']:.0%}")
 print(f"Malicious Activity Score: {malicious_activity_percent}%")
+print(f"SUMMARY_SOURCE: {llm_assessment['summary_source']}")
 if vision_error:
     print("VISION_ERROR_JSON: " + json.dumps(vision_error, ensure_ascii=False))
 print("FRAME_SUMMARIES_JSON: " + json.dumps(
