@@ -9,6 +9,7 @@ from pathlib import Path
 import streamlit as st
 
 API_KEY = st.secrets["API_KEY"]
+PROCESSOR_VERSION = 2
 
 BASE_DIR = Path(__file__).resolve().parent
 PROCESSOR = BASE_DIR / "main.py"
@@ -32,7 +33,10 @@ if uploaded_video is None:
 else:
     upload_id = hashlib.sha256(uploaded_video.getbuffer()).hexdigest()
     previous_result = st.session_state.get("video_result")
-    if previous_result and previous_result.get("upload_id") != upload_id:
+    if previous_result and (
+        previous_result.get("upload_id") != upload_id
+        or previous_result.get("processor_version") != PROCESSOR_VERSION
+    ):
         st.session_state.pop("video_result", None)
 
 if uploaded_video and st.button("Process video", type="primary"):
@@ -92,6 +96,7 @@ if uploaded_video and st.button("Process video", type="primary"):
         "file_stem": Path(uploaded_video.name).stem,
         "upload_name": uploaded_video.name,
         "upload_id": upload_id,
+        "processor_version": PROCESSOR_VERSION,
     }
 
 
