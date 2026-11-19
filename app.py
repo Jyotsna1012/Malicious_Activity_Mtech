@@ -1,3 +1,4 @@
+import hashlib
 import os
 import subprocess
 import sys
@@ -23,12 +24,22 @@ st.caption("OpenAI API key is read from Streamlit secrets.")
 uploaded_video = st.file_uploader(
     "Choose a video file",
     type=["mp4", "avi", "mov", "mkv", "webm"],
+    key="video_upload",
 )
+
+if uploaded_video is None:
+    st.session_state.pop("video_result", None)
+else:
+    upload_id = hashlib.sha256(uploaded_video.getbuffer()).hexdigest()
+    previous_result = st.session_state.get("video_result")
+    if previous_result and previous_result.get("upload_id") != upload_id:
+        st.session_state.pop("video_result", None)
 
 if uploaded_video and st.button("Process video", type="primary"):
     result = None
     video_bytes = None
     processor_output = ""
+    upload_id = hashlib.sha256(uploaded_video.getbuffer()).hexdigest()
 
     try:
         if not PROCESSOR.is_file():
@@ -80,22 +91,16 @@ if uploaded_video and st.button("Process video", type="primary"):
         "processor_output": processor_output,
         "file_stem": Path(uploaded_video.name).stem,
         "upload_name": uploaded_video.name,
+        "upload_id": upload_id,
     }
 
 
 video_result = st.session_state.get("video_result")
-if video_result and uploaded_video and video_result["upload_name"] == uploaded_video.name:
+if video_result and uploaded_video and video_result.get("upload_id") == upload_id:
     result_video = video_result["video_bytes"]
     if result_video:
-        st.success("Processed video is ready to preview and download.")
-        st.video(result_video)
-        st.download_button(
-            "Download processed video",
-            data=result_video,
-            file_name=f"{video_result['file_stem']}_annotated.mp4",
-            mime="video/mp4",
-            type="primary",
-        )
+        st.success("Processed video is ready to play. Use the video controls to replay it anytime.")
+        st.video(result_video, format="video/mp4")
 
     returncode = video_result["returncode"]
     if returncode is not None and returncode != 0:
