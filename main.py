@@ -102,7 +102,7 @@ if fps == 0:
 MAX_SECONDS = 20
 MAX_FRAMES = min(int(fps * MAX_SECONDS), 540)
 frame_counter = 0
-SAMPLE_INTERVAL_SECONDS = 5.0
+SAMPLE_INTERVAL_SECONDS = 1.0
 next_sample_time = 0.0
 sampled_frames = []
 
@@ -548,7 +548,11 @@ except Exception as exc:
 # FINAL CONCLUSION (FORCED CONSISTENCY)
 # ==================================================
 max_threat = max(threat_score_log)
-malicious_activity_percent = round(float(np.mean(threat_score_log)))
+frame_activity_score = round(float(np.mean(threat_score_log)))
+vision_aggression_score = 0
+if llm_assessment["assessment"] == "POSSIBLE_PHYSICAL_AGGRESSION":
+    vision_aggression_score = round(llm_assessment["confidence"] * 100)
+malicious_activity_percent = max(frame_activity_score, vision_aggression_score)
 idx = threat_score_log.index(max_threat)
 
 final_fight_type = fight_type_log[idx]
@@ -569,6 +573,9 @@ print(f"Dominant Action           : {action_log[idx]}")
 print(f"Dominant Emotion          : {emotion_log[idx]}")
 print(f"Final Fight Type          : {final_fight_type}")
 print(f"Threat Score (Max)        : {max_threat} / 100")
+print(f"Frame Activity Score: {frame_activity_score}%")
+print(f"Vision Assessment: {llm_assessment['assessment']}")
+print(f"Vision Confidence: {llm_assessment['confidence']:.0%}")
 print(f"Malicious Activity Score: {malicious_activity_percent}%")
 print("-----------------------------------------------------")
 print("LOGIC APPLIED             : Multi-person evaluation")

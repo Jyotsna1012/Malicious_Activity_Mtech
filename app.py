@@ -12,7 +12,7 @@ import streamlit as st
 import streamlit.components.v1 as components
 
 API_KEY = st.secrets["API_KEY"]
-PROCESSOR_VERSION = 3
+PROCESSOR_VERSION = 4
 
 BASE_DIR = Path(__file__).resolve().parent
 PROCESSOR = BASE_DIR / "main.py"
@@ -47,6 +47,9 @@ if uploaded_video and st.button("Process video", type="primary"):
     video_bytes = None
     processor_output = ""
     malicious_activity_percent = None
+    frame_activity_score = None
+    vision_assessment = None
+    vision_confidence = None
     upload_id = hashlib.sha256(uploaded_video.getbuffer()).hexdigest()
 
     try:
@@ -89,6 +92,27 @@ if uploaded_video and st.button("Process video", type="primary"):
             )
             if score_match:
                 malicious_activity_percent = float(score_match.group(1))
+            frame_match = re.search(
+                r"Frame Activity Score\s*:\s*(\d+(?:\.\d+)?)%",
+                processor_output,
+                re.IGNORECASE,
+            )
+            if frame_match:
+                frame_activity_score = float(frame_match.group(1))
+            assessment_match = re.search(
+                r"Vision Assessment\s*:\s*([A-Z_]+)",
+                processor_output,
+                re.IGNORECASE,
+            )
+            if assessment_match:
+                vision_assessment = assessment_match.group(1)
+            confidence_match = re.search(
+                r"Vision Confidence\s*:\s*(\d+(?:\.\d+)?)%",
+                processor_output,
+                re.IGNORECASE,
+            )
+            if confidence_match:
+                vision_confidence = float(confidence_match.group(1))
             if output_path.is_file() and output_path.stat().st_size > 0:
                 video_bytes = output_path.read_bytes()
     except subprocess.TimeoutExpired as exc:
@@ -109,6 +133,9 @@ if uploaded_video and st.button("Process video", type="primary"):
         "upload_id": upload_id,
         "processor_version": PROCESSOR_VERSION,
         "malicious_activity_percent": malicious_activity_percent,
+        "frame_activity_score": frame_activity_score,
+        "vision_assessment": vision_assessment,
+        "vision_confidence": vision_confidence,
     }
 
 
@@ -163,8 +190,13 @@ if video_result and uploaded_video and video_result.get("upload_id") == upload_i
                 f"{score:.0f}%" if score is not None else "Unavailable",
             )
             st.caption(
-                "Average heuristic score from detected actions/posture and emotions. "
-                "This is not a probability or judgment of intent."
+                f"Frame cue score: {video_result.get('frame_activity_score') if video_result.get('frame_activity_score') is not None else 'Unavailable'}%. "
+                f"Vision: {video_result.get('vision_assessment') or 'Unavailable'} "
+                f"({video_result.get('vision_confidence') if video_result.get('vision_confidence') is not None else '—'}% confidence)."
+            )
+            st.caption(
+                "The displayed estimate takes the stronger frame cue or vision signal. "
+                "It is not a probability or judgment of intent."
             )
 
     if video_result["processor_output"]:
