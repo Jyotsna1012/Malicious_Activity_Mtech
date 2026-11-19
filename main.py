@@ -556,14 +556,27 @@ try:
     )
 except Exception as exc:
     print(f"LLM assessment skipped: {type(exc).__name__}: {exc}", flush=True)
+    error_text = str(exc).lower()
+    if "credit_balance_exhausted" in error_text or "insufficient_quota" in error_text:
+        vision_error = (
+            "OpenAI vision analysis could not run because the API account for this key "
+            "has no credits. Add API credits, then reprocess the video."
+        )
+    else:
+        vision_error = (
+            f"OpenAI vision analysis could not run ({type(exc).__name__}). "
+            "Frame descriptions and the visual summary are unavailable."
+        )
     llm_assessment = {
-        "assessment": "UNCLEAR",
-        "confidence": 0.0,
-        "summary": "LLM assessment unavailable; heuristic analysis only.",
+        "assessment": "VISION_UNAVAILABLE",
+        "confidence": None,
+        "summary": "",
         "frame_summaries": [],
         "evidence": [],
-        "uncertainties": [f"LLM call failed: {type(exc).__name__}"],
+        "uncertainties": [vision_error],
     }
+else:
+    vision_error = None
 
 # ==================================================
 # FINAL CONCLUSION (FORCED CONSISTENCY)
@@ -596,8 +609,13 @@ print(f"Final Fight Type          : {final_fight_type}")
 print(f"Threat Score (Max)        : {max_threat} / 100")
 print(f"Frame Activity Score: {frame_activity_score}%")
 print(f"Vision Assessment: {llm_assessment['assessment']}")
-print(f"Vision Confidence: {llm_assessment['confidence']:.0%}")
+if llm_assessment["confidence"] is None:
+    print("Vision Confidence: unavailable")
+else:
+    print(f"Vision Confidence: {llm_assessment['confidence']:.0%}")
 print(f"Malicious Activity Score: {malicious_activity_percent}%")
+if vision_error:
+    print("VISION_ERROR_JSON: " + json.dumps(vision_error, ensure_ascii=False))
 print("FRAME_SUMMARIES_JSON: " + json.dumps(
     llm_assessment.get("frame_summaries", []), ensure_ascii=False
 ))
@@ -611,8 +629,11 @@ print("=====================================================\n")
 
 print("\n================ OPENAI VISION ASSESSMENT ================")
 print(f"Assessment                : {llm_assessment['assessment']}")
-print(f"Confidence                : {llm_assessment['confidence']:.0%}")
-print(f"Summary                   : {llm_assessment['summary']}")
+if llm_assessment["confidence"] is None:
+    print("Confidence                : unavailable")
+else:
+    print(f"Confidence                : {llm_assessment['confidence']:.0%}")
+print(f"Summary                   : {llm_assessment['summary'] or 'Not generated because vision analysis was unavailable.'}")
 print("Evidence:")
 for item in llm_assessment["evidence"]:
     print(f"  - {item}")

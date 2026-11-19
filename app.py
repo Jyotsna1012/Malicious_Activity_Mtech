@@ -13,7 +13,7 @@ import streamlit as st
 import streamlit.components.v1 as components
 
 API_KEY = st.secrets["API_KEY"]
-PROCESSOR_VERSION = 5
+PROCESSOR_VERSION = 6
 
 BASE_DIR = Path(__file__).resolve().parent
 PROCESSOR = BASE_DIR / "main.py"
@@ -51,6 +51,7 @@ if uploaded_video and st.button("Process video", type="primary"):
     frame_activity_score = None
     vision_assessment = None
     vision_confidence = None
+    vision_error = None
     frame_summaries = []
     video_summary = None
     upload_id = hashlib.sha256(uploaded_video.getbuffer()).hexdigest()
@@ -116,6 +117,16 @@ if uploaded_video and st.button("Process video", type="primary"):
             )
             if confidence_match:
                 vision_confidence = float(confidence_match.group(1))
+            vision_error_match = re.search(
+                r"^VISION_ERROR_JSON:\s*(.+)$",
+                processor_output,
+                re.MULTILINE,
+            )
+            if vision_error_match:
+                try:
+                    vision_error = json.loads(vision_error_match.group(1))
+                except json.JSONDecodeError:
+                    vision_error = "OpenAI vision analysis could not be completed."
             frame_summaries_match = re.search(
                 r"^FRAME_SUMMARIES_JSON:\s*(.+)$",
                 processor_output,
@@ -159,6 +170,7 @@ if uploaded_video and st.button("Process video", type="primary"):
         "frame_activity_score": frame_activity_score,
         "vision_assessment": vision_assessment,
         "vision_confidence": vision_confidence,
+        "vision_error": vision_error,
         "frame_summaries": frame_summaries,
         "video_summary": video_summary,
     }
@@ -211,17 +223,34 @@ if video_result and uploaded_video and video_result.get("upload_id") == upload_i
         with score_column:
             score = video_result.get("malicious_activity_percent")
             st.metric(
-                "Estimated malicious activity",
+                "Frame-based heuristic score" if video_result.get("vision_error") else "Estimated malicious activity",
                 f"{score:.0f}%" if score is not None else "Unavailable",
             )
-            st.caption(
-                f"Frame cue score: {video_result.get('frame_activity_score') if video_result.get('frame_activity_score') is not None else 'Unavailable'}%. "
-                f"Vision: {video_result.get('vision_assessment') or 'Unavailable'} "
-                f"({video_result.get('vision_confidence') if video_result.get('vision_confidence') is not None else '—'}% confidence)."
-            )
-            st.caption(
-                "The displayed estimate takes the stronger frame cue or vision signal. "
-                "It is not a probability or judgment of intent."
+            if video_result.get("vision_error"):
+                st.caption(
+                    f"Average local frame-cue score: "
+                    f"{video_result.get('frame_activity_score') if video_result.get('frame_activity_score') is not None else 'Unavailable'}%. "
+                    "This is not the percent of video frames containing malicious activity."
+                )
+            else:
+                vision_confidence_text = (
+                    f"{video_result['vision_confidence']:.0f}%"
+                    if video_result.get("vision_confidence") is not None
+                    else "unavailable"
+                )
+                st.caption(
+                    f"Frame cue score: {video_result.get('frame_activity_score') if video_result.get('frame_activity_score') is not None else 'Unavailable'}%. "
+                    f"Vision: {video_result.get('vision_assessment') or 'Unavailable'} "
+                    f"({vision_confidence_text} confidence)."
+                )
+                st.caption(
+                    "The displayed estimate takes the stronger frame cue or vision signal. "
+                    "It is not a probability or judgment of intent."
+                )
+
+        if video_result.get("vision_error"):
+            st.warning(
+                f"{video_result['vision_error']} [OpenAI API billing settings](https://platform.openai.com/settings/organization/billing/)."
             )
 
         with st.expander("Frame-by-frame details and overall summary", expanded=True):
@@ -234,20 +263,23 @@ if video_result and uploaded_video and video_result.get("upload_id") == upload_i
                 for index, frame_summary in enumerate(summaries, start=1):
                     timestamp = float(frame_summary.get("timestamp_seconds", 0))
                     observation = frame_summary.get("observation", "No observation returned.")
+                    observation = " ".join(observation.splitlines())
                     st.markdown(f"**{index}. {timestamp:.1f}s** — {observation}")
             else:
-                st.info(
-                    "Frame-by-frame details are unavailable. Check the processing log "
-                    "for the vision analysis error."
-                )
+                if video_result.get("vision_error"):
+                    st.info("No visual frame descriptions were generated because the vision request did not run.")
+                else:
+                    st.info("The vision model did not return frame descriptions.")
             st.markdown("**Overall video summary**")
-            st.write(
-                video_result.get("video_summary")
-                or "An overall summary was not returned."
-            )
+            if video_result.get("video_summary"):
+                st.write(video_result["video_summary"])
+            elif video_result.get("vision_error"):
+                st.info("No visual summary was generated because the vision request did not run.")
+            else:
+                st.info("The vision model did not return an overall summary.")
 
     if video_result["processor_output"]:
-        with st.expander("Processing log", expanded=False):
+        with st.expander("Technical processing log", expanded=False):
             st.code(video_result["processor_output"][-20000:])
 
     returncode = video_result["returncode"]
