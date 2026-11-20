@@ -13,7 +13,7 @@ import streamlit as st
 import streamlit.components.v1 as components
 
 API_KEY = st.secrets["API_KEY"]
-PROCESSOR_VERSION = 9
+PROCESSOR_VERSION = 10
 
 BASE_DIR = Path(__file__).resolve().parent
 PROCESSOR = BASE_DIR / "main.py"
@@ -55,6 +55,7 @@ if uploaded_video and st.button("Process video", type="primary"):
     frame_summaries = []
     video_summary = None
     api_usage = None
+    face_detection_summary = None
     upload_id = hashlib.sha256(uploaded_video.getbuffer()).hexdigest()
 
     try:
@@ -158,6 +159,16 @@ if uploaded_video and st.button("Process video", type="primary"):
                     api_usage = json.loads(usage_match.group(1))
                 except json.JSONDecodeError:
                     api_usage = None
+            face_summary_match = re.search(
+                r"^FACE_DETECTION_SUMMARY_JSON:\s*(.+)$",
+                processor_output,
+                re.MULTILINE,
+            )
+            if face_summary_match:
+                try:
+                    face_detection_summary = json.loads(face_summary_match.group(1))
+                except json.JSONDecodeError:
+                    face_detection_summary = None
             if output_path.is_file() and output_path.stat().st_size > 0:
                 video_bytes = output_path.read_bytes()
     except subprocess.TimeoutExpired as exc:
@@ -185,6 +196,7 @@ if uploaded_video and st.button("Process video", type="primary"):
         "frame_summaries": frame_summaries,
         "video_summary": video_summary,
         "api_usage": api_usage,
+        "face_detection_summary": face_detection_summary,
         "summary_source": "LOCAL_CV" if vision_error else "LLM_VISION",
     }
 
@@ -266,6 +278,19 @@ if video_result and uploaded_video and video_result.get("upload_id") == upload_i
                     f"Vision API usage: {usage['input_tokens']:,} input tokens, "
                     f"{usage.get('output_tokens') or 0:,} output tokens."
                 )
+            face_summary = video_result.get("face_detection_summary")
+            if face_summary:
+                if face_summary["frames_with_faces"] == 0:
+                    st.warning(
+                        "The local detector found no faces, so emotion findings are unavailable. "
+                        "Small, distant, blurred, turned-away, or occluded faces may be missed."
+                    )
+                else:
+                    st.caption(
+                        f"Local face detector: faces found on "
+                        f"{face_summary['frames_with_faces']}/{face_summary['frames_processed']} frames; "
+                        f"maximum {face_summary['maximum_faces_in_frame']} in one frame."
+                    )
 
         if video_result.get("vision_error"):
             st.warning(
@@ -278,13 +303,14 @@ if video_result and uploaded_video and video_result.get("upload_id") == upload_i
             if video_result.get("summary_source") == "LOCAL_CV":
                 st.markdown("**Summary source: LOCAL COMPUTER VISION ONLY (not an LLM response)**")
                 st.caption(
-                    f"One local-cue line per processed frame ({len(summaries)} frames). "
+                    f"One local-cue line per sampled frame, at most 1 per second "
+                    f"({len(summaries)} frames). "
                     "These movement cues do not identify a fight or determine intent."
                 )
             else:
                 st.markdown("**Summary source: OpenAI vision analysis**")
                 st.caption(
-                    f"One line per sampled frame, currently sampled every second "
+                    f"One line per sampled frame, at most 1 per second "
                     f"({len(summaries)} frames summarized)."
                 )
             if summaries:

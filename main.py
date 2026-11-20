@@ -54,8 +54,8 @@ if not os.path.isfile(emotion_model_path):
 emotion_model = tf.keras.models.load_model(emotion_model_path, compile=False)
 
 face_detector = mp.solutions.face_detection.FaceDetection(
-    model_selection=0,
-    min_detection_confidence=0.5,
+    model_selection=1,
+    min_detection_confidence=0.3,
 )
 
 bg_subtractor = cv2.createBackgroundSubtractorMOG2(
@@ -485,10 +485,13 @@ while cap.isOpened() and frame_counter < MAX_FRAMES:
     if sampled_image_data is not None:
         sampled_frames.append((video_time, sampled_image_data))
         sampled_frame_signals.append({
+            "timestamp_seconds": video_time,
             "action": frame_action_label,
             "emotion": dominant_emotion,
             "people_count": person_count,
+            "face_count": face_count,
             "risk": risk,
+            "threat_score": threat_score,
         })
 
     # Larger labels remain readable in both the output video and smaller preview.
@@ -675,22 +678,15 @@ except Exception as exc:
     llm_assessment["summary_source"] = "LOCAL_CV"
     llm_assessment["frame_summaries"] = [
         {
-            "timestamp_seconds": index / fps,
+            "timestamp_seconds": cue["timestamp_seconds"],
             "observation": (
-                f"Local cues only: pose action={action}; "
-                f"face emotion={emotion if face_count > 0 else 'no face detected'}; "
-                f"estimated people={people}; detected faces={face_count}; "
-                f"heuristic risk={risk} ({score}/100)."
+                f"Local cues only: pose action={cue['action']}; "
+                f"face emotion={cue['emotion'] if cue['face_count'] > 0 else 'no face detected'}; "
+                f"estimated people={cue['people_count']}; detected faces={cue['face_count']}; "
+                f"heuristic risk={cue['risk']} ({cue['threat_score']}/100)."
             ),
         }
-        for index, (action, emotion, people, face_count, risk, score) in enumerate(zip(
-            action_log,
-            emotion_log,
-            person_count_log,
-            face_count_log,
-            risk_log,
-            threat_score_log,
-        ))
+        for cue in sampled_frame_signals
     ]
 else:
     vision_error = None
@@ -741,6 +737,11 @@ print("FRAME_SUMMARIES_JSON: " + json.dumps(
 print("VIDEO_SUMMARY_JSON: " + json.dumps(
     llm_assessment["summary"], ensure_ascii=False
 ))
+print("FACE_DETECTION_SUMMARY_JSON: " + json.dumps({
+    "maximum_faces_in_frame": max(face_count_log),
+    "frames_with_faces": sum(count > 0 for count in face_count_log),
+    "frames_processed": len(face_count_log),
+}))
 if llm_assessment.get("api_usage"):
     print("VISION_USAGE_JSON: " + json.dumps(llm_assessment["api_usage"]))
 print("-----------------------------------------------------")
