@@ -1,347 +1,194 @@
-import base64
-import hashlib
-import json
+"""Streamlit dashboard for the local malicious-activity screening demo."""
+from __future__ import annotations
+
 import os
-import re
-import subprocess
-import sys
 import tempfile
-import traceback
+import time
 from pathlib import Path
 
+import cv2
 import streamlit as st
-import streamlit.components.v1 as components
 
-API_KEY = st.secrets["API_KEY"]
-PROCESSOR_VERSION = 10
+import database as db
+from alerts import ALERT_THRESHOLD, send_incident_alert
+from detector import analyze_video
 
-BASE_DIR = Path(__file__).resolve().parent
-PROCESSOR = BASE_DIR / "main.py"
+ROOT = Path(__file__).resolve().parent
+DATA_DIR = Path(os.getenv("APP_DATA_DIR", ROOT / "user_data"))
+DATA_DIR.mkdir(parents=True, exist_ok=True)
+db.init_db()
 
-st.set_page_config(page_title="Video Activity Analysis", page_icon="🎥")
-st.title("Video Activity Analysis")
-st.write(
-    "Upload a video to generate an annotated version. The processor analyzes "
-    "up to the first 540 frames."
-)
-st.caption("OpenAI API key is read from Streamlit secrets.")
+st.set_page_config(page_title="Local Activity Screening", page_icon="🛡️", layout="wide")
 
-uploaded_video = st.file_uploader(
-    "Choose a video file",
-    type=["mp4", "avi", "mov", "mkv", "webm"],
-    key="video_upload",
-)
 
-if uploaded_video is None:
-    st.session_state.pop("video_result", None)
-else:
-    upload_id = hashlib.sha256(uploaded_video.getbuffer()).hexdigest()
-    previous_result = st.session_state.get("video_result")
-    if previous_result and (
-        previous_result.get("upload_id") != upload_id
-        or previous_result.get("processor_version") != PROCESSOR_VERSION
-    ):
-        st.session_state.pop("video_result", None)
+def login_view():
+    st.title("🛡️ AI-Powered Activity Screening")
+    st.caption("Local open-source computer vision • SQLite demo portal")
+    login_tab, signup_tab = st.tabs(["Log in", "Create account"])
+    with login_tab:
+        with st.form("login_form"):
+            email = st.text_input("Email", key="login_email")
+            password = st.text_input("Password", type="password", key="login_password")
+            submitted = st.form_submit_button("Log in", type="primary")
+        if submitted:
+            user = db.authenticate(email, password)
+            if user:
+                st.session_state.user_id = user.id
+                st.session_state.email = user.email
+                st.rerun()
+            st.error("Email or password is incorrect.")
+    with signup_tab:
+        with st.form("signup_form"):
+            email = st.text_input("Email address", key="signup_email")
+            password = st.text_input("Password (at least 8 characters)", type="password", key="signup_password")
+            submitted = st.form_submit_button("Create account", type="primary")
+        if submitted:
+            user, error = db.create_user(email, password)
+            if error:
+                st.error(error)
+            else:
+                st.session_state.user_id = user.id
+                st.session_state.email = user.email
+                st.success("Account created on the Basic plan.")
+                st.rerun()
 
-if uploaded_video and st.button("Process video", type="primary"):
-    result = None
-    video_bytes = None
-    processor_output = ""
-    malicious_activity_percent = None
-    frame_activity_score = None
-    vision_assessment = None
-    vision_confidence = None
-    vision_error = None
-    frame_summaries = []
-    video_summary = None
-    api_usage = None
-    face_detection_summary = None
-    upload_id = hashlib.sha256(uploaded_video.getbuffer()).hexdigest()
 
+def capture_webcam(seconds: int, destination: Path) -> None:
+    """Capture a short clip from the server's default camera for local demos."""
+    camera = cv2.VideoCapture(0)
+    if not camera.isOpened():
+        raise RuntimeError("Could not open webcam 0 on the machine running Streamlit.")
+    fps = camera.get(cv2.CAP_PROP_FPS) or 20.0
+    fps = min(max(fps, 5.0), 30.0)
+    width = int(camera.get(cv2.CAP_PROP_FRAME_WIDTH) or 640)
+    height = int(camera.get(cv2.CAP_PROP_FRAME_HEIGHT) or 480)
+    writer = cv2.VideoWriter(str(destination), cv2.VideoWriter_fourcc(*"mp4v"), fps, (width, height))
+    if not writer.isOpened():
+        camera.release()
+        raise RuntimeError("Could not create webcam recording.")
+    deadline = time.monotonic() + seconds
     try:
-        if not PROCESSOR.is_file():
-            raise FileNotFoundError(f"Could not find the video processor: {PROCESSOR}")
-
-        suffix = Path(uploaded_video.name).suffix or ".mp4"
-        with tempfile.TemporaryDirectory(prefix="video_analysis_") as temp_dir:
-            input_path = Path(temp_dir) / f"uploaded_video{suffix}"
-            output_path = input_path.with_name("uploaded_video_annotated.mp4")
-            input_path.write_bytes(uploaded_video.getbuffer())
-
-            process_env = os.environ.copy()
-            process_env["OPENAI_API_KEY"] = API_KEY
-            command = [
-                sys.executable,
-                str(PROCESSOR),
-                str(input_path),
-                "--no-preview",
-            ]
-
-            with st.spinner("Processing video. This may take a few minutes..."):
-                result = subprocess.run(
-                    command,
-                    cwd=BASE_DIR,
-                    env=process_env,
-                    capture_output=True,
-                    text=True,
-                    errors="replace",
-                    timeout=900,
-                    check=False,
-                )
-            processor_output = "\n".join(
-                part for part in (result.stdout, result.stderr) if part
-            )
-            score_match = re.search(
-                r"Malicious Activity Score\s*:\s*(\d+(?:\.\d+)?)%",
-                processor_output,
-                re.IGNORECASE,
-            )
-            if score_match:
-                malicious_activity_percent = float(score_match.group(1))
-            frame_match = re.search(
-                r"Frame Activity Score\s*:\s*(\d+(?:\.\d+)?)%",
-                processor_output,
-                re.IGNORECASE,
-            )
-            if frame_match:
-                frame_activity_score = float(frame_match.group(1))
-            assessment_match = re.search(
-                r"Vision Assessment\s*:\s*([A-Z_]+)",
-                processor_output,
-                re.IGNORECASE,
-            )
-            if assessment_match:
-                vision_assessment = assessment_match.group(1)
-            confidence_match = re.search(
-                r"Vision Confidence\s*:\s*(\d+(?:\.\d+)?)%",
-                processor_output,
-                re.IGNORECASE,
-            )
-            if confidence_match:
-                vision_confidence = float(confidence_match.group(1))
-            vision_error_match = re.search(
-                r"^VISION_ERROR_JSON:\s*(.+)$",
-                processor_output,
-                re.MULTILINE,
-            )
-            if vision_error_match:
-                try:
-                    vision_error = json.loads(vision_error_match.group(1))
-                except json.JSONDecodeError:
-                    vision_error = "OpenAI vision analysis could not be completed."
-            frame_summaries_match = re.search(
-                r"^FRAME_SUMMARIES_JSON:\s*(.+)$",
-                processor_output,
-                re.MULTILINE,
-            )
-            if frame_summaries_match:
-                try:
-                    frame_summaries = json.loads(frame_summaries_match.group(1))
-                except json.JSONDecodeError:
-                    frame_summaries = []
-            video_summary_match = re.search(
-                r"^VIDEO_SUMMARY_JSON:\s*(.+)$",
-                processor_output,
-                re.MULTILINE,
-            )
-            if video_summary_match:
-                try:
-                    video_summary = json.loads(video_summary_match.group(1))
-                except json.JSONDecodeError:
-                    video_summary = None
-            usage_match = re.search(
-                r"^VISION_USAGE_JSON:\s*(.+)$",
-                processor_output,
-                re.MULTILINE,
-            )
-            if usage_match:
-                try:
-                    api_usage = json.loads(usage_match.group(1))
-                except json.JSONDecodeError:
-                    api_usage = None
-            face_summary_match = re.search(
-                r"^FACE_DETECTION_SUMMARY_JSON:\s*(.+)$",
-                processor_output,
-                re.MULTILINE,
-            )
-            if face_summary_match:
-                try:
-                    face_detection_summary = json.loads(face_summary_match.group(1))
-                except json.JSONDecodeError:
-                    face_detection_summary = None
-            if output_path.is_file() and output_path.stat().st_size > 0:
-                video_bytes = output_path.read_bytes()
-    except subprocess.TimeoutExpired as exc:
-        processor_output = "Processing timed out after 15 minutes."
-        if exc.stdout:
-            processor_output += f"\n\nPartial output:\n{exc.stdout}"
-        if exc.stderr:
-            processor_output += f"\n\nPartial errors:\n{exc.stderr}"
-    except Exception as exc:
-        processor_output = f"{type(exc).__name__}: {exc}\n\n{traceback.format_exc()}"
-
-    st.session_state["video_result"] = {
-        "video_bytes": video_bytes,
-        "returncode": result.returncode if result is not None else None,
-        "processor_output": processor_output,
-        "file_stem": Path(uploaded_video.name).stem,
-        "upload_name": uploaded_video.name,
-        "upload_id": upload_id,
-        "processor_version": PROCESSOR_VERSION,
-        "malicious_activity_percent": malicious_activity_percent,
-        "frame_activity_score": frame_activity_score,
-        "vision_assessment": vision_assessment,
-        "vision_confidence": vision_confidence,
-        "vision_error": vision_error,
-        "frame_summaries": frame_summaries,
-        "video_summary": video_summary,
-        "api_usage": api_usage,
-        "face_detection_summary": face_detection_summary,
-        "summary_source": "LOCAL_CV" if vision_error else "LLM_VISION",
-    }
+        while time.monotonic() < deadline:
+            ok, frame = camera.read()
+            if ok:
+                writer.write(frame)
+    finally:
+        camera.release()
+        writer.release()
 
 
-video_result = st.session_state.get("video_result")
-if video_result and uploaded_video and video_result.get("upload_id") == upload_id:
-    result_video = video_result["video_bytes"]
-    if result_video:
-        st.success("Processed video is ready to play. Use the video controls to replay it anytime.")
-        video_data = base64.b64encode(result_video).decode("ascii")
-        video_column, score_column = st.columns([3, 1])
-        with video_column:
-            components.html(
-                """
-                <video id="processed-video" controls playsinline preload="metadata"
-                       style="display:block;width:100%;max-height:70vh;background:#111">
-                  <source src="data:video/mp4;base64,__VIDEO_DATA__" type="video/mp4">
-                </video>
-                <div id="playback-status" role="status" aria-live="polite"
-                     style="font:14px sans-serif;padding:8px 0;color:#555">
-                  Loading video metadata...
-                </div>
-                <script>
-                  const player = document.getElementById("processed-video");
-                  const status = document.getElementById("playback-status");
-                  const mediaErrors = {
-                    1: "Playback was cancelled.",
-                    2: "The browser had a network error while loading the video.",
-                    3: "The browser could not decode this video. Its codec or file data may be invalid.",
-                    4: "The browser does not support this video format or codec."
-                  };
-                  player.addEventListener("loadedmetadata", () => {
-                    status.textContent = `Video loaded (${player.videoWidth}x${player.videoHeight}, ` +
-                      `${Number.isFinite(player.duration) ? player.duration.toFixed(1) + " s" : "duration unknown"}).`;
-                  });
-                  player.addEventListener("error", () => {
-                    const error = player.error;
-                    const code = error ? error.code : 0;
-                    status.textContent = `Playback error${code ? ` (code ${code})` : ""}: ` +
-                      `${mediaErrors[code] || "The browser could not load the processed video."}` +
-                      `${error && error.message ? ` Details: ${error.message}` : ""}`;
-                    status.style.color = "#b00020";
-                  });
-                </script>
-                """.replace("__VIDEO_DATA__", video_data),
-                height=500,
-                scrolling=False,
-            )
-        with score_column:
-            score = video_result.get("malicious_activity_percent")
-            st.metric(
-                "Frame-based heuristic score" if video_result.get("vision_error") else "Estimated malicious activity",
-                f"{score:.0f}%" if score is not None else "Unavailable",
-            )
-            if video_result.get("vision_error"):
-                st.caption(
-                    f"Average local frame-cue score: "
-                    f"{video_result.get('frame_activity_score') if video_result.get('frame_activity_score') is not None else 'Unavailable'}%. "
-                    "This is not the percent of video frames containing malicious activity."
-                )
+def run_scan(source: Path, source_name: str, use_caption: bool):
+    user_id = st.session_state.user_id
+    evidence_dir = DATA_DIR / "evidence" / str(user_id)
+    evidence_dir.mkdir(parents=True, exist_ok=True)
+    token = f"scan_{int(time.time())}"
+    snapshot = evidence_dir / f"{token}.jpg"
+    annotated = evidence_dir / f"{token}_annotated.mp4"
+    progress = st.progress(0, text="Loading local detection model…")
+    try:
+        result = analyze_video(
+            source, output_path=annotated, snapshot_path=snapshot,
+            progress_callback=lambda value: progress.progress(min(value, 1.0), text="Analyzing video locally…"),
+            use_caption_model=use_caption,
+        )
+    finally:
+        progress.empty()
+    alerted, alert_message = send_incident_alert(st.session_state.email, result, str(snapshot) if snapshot.exists() else None)
+    record = db.save_incident(user_id, result, source_name, str(snapshot) if snapshot.exists() else None, alerted)
+    st.session_state.last_scan = {**result, "snapshot_path": str(snapshot), "annotated_path": result["video_path"], "alert_message": alert_message, "incident_id": record.id}
+
+
+def dashboard():
+    user_id = st.session_state.user_id
+    plan, used, allowance = db.get_usage(user_id)
+    with st.sidebar:
+        st.write(f"Signed in as **{st.session_state.email}**")
+        st.write(f"Plan: **{plan}**")
+        st.caption(f"Scans this month: {used}/{allowance}")
+        if st.button("Log out"):
+            st.session_state.clear()
+            st.rerun()
+    st.title("AI-Powered Malicious Activity Detection & Alert System")
+    st.caption("Local inference using open-source models. Results are screening cues and require human review.")
+    tab_scan, tab_plans, tab_history = st.tabs(["Video analysis", "Subscription", "Emergency alert history"])
+
+    with tab_scan:
+        st.info("The default YOLOv8 nano weights run locally after the first download. Optional BLIP captions use a local Hugging Face model and may need several GB of RAM.")
+        if used >= allowance:
+            st.warning("Monthly scan limit reached. Upgrade your plan to continue.")
+        upload, webcam = st.columns(2)
+        uploaded = upload.file_uploader("Upload an MP4 or AVI clip", type=["mp4", "avi"], disabled=used >= allowance)
+        use_caption = st.checkbox("Generate optional local image captions (downloads BLIP weights)")
+        if uploaded and upload.button("Analyze uploaded video", type="primary", disabled=used >= allowance):
+            if uploaded.size > 500 * 1024 * 1024:
+                st.error("Maximum upload size is 500 MB.")
             else:
-                vision_confidence_text = (
-                    f"{video_result['vision_confidence']:.0f}%"
-                    if video_result.get("vision_confidence") is not None
-                    else "unavailable"
-                )
-                st.caption(
-                    f"Frame cue score: {video_result.get('frame_activity_score') if video_result.get('frame_activity_score') is not None else 'Unavailable'}%. "
-                    f"Vision: {video_result.get('vision_assessment') or 'Unavailable'} "
-                    f"({vision_confidence_text} confidence)."
-                )
-                st.caption(
-                    "The displayed estimate takes the stronger frame cue or vision signal. "
-                    "It is not a probability or judgment of intent."
-                )
-            usage = video_result.get("api_usage")
-            if usage and usage.get("input_tokens") is not None:
-                st.caption(
-                    f"Vision API usage: {usage['input_tokens']:,} input tokens, "
-                    f"{usage.get('output_tokens') or 0:,} output tokens."
-                )
-            face_summary = video_result.get("face_detection_summary")
-            if face_summary:
-                if face_summary["frames_with_faces"] == 0:
-                    st.warning(
-                        "The local detector found no faces, so emotion findings are unavailable. "
-                        "Small, distant, blurred, turned-away, or occluded faces may be missed."
-                    )
-                else:
-                    st.caption(
-                        f"Local face detector: faces found on "
-                        f"{face_summary['frames_with_faces']}/{face_summary['frames_processed']} frames; "
-                        f"maximum {face_summary['maximum_faces_in_frame']} in one frame."
-                    )
+                with tempfile.TemporaryDirectory(prefix="local_scan_") as tmp:
+                    source = Path(tmp) / Path(uploaded.name).name
+                    source.write_bytes(uploaded.getbuffer())
+                    try:
+                        run_scan(source, uploaded.name, use_caption)
+                    except Exception as exc:
+                        st.exception(exc)
+        webcam_seconds = webcam.slider("Webcam capture length (seconds)", 5, 30, 10)
+        if webcam.button("Capture and analyze server webcam", disabled=used >= allowance):
+            with tempfile.TemporaryDirectory(prefix="webcam_scan_") as tmp:
+                source = Path(tmp) / "webcam.mp4"
+                try:
+                    with st.spinner("Recording from the webcam connected to the Streamlit host…"):
+                        capture_webcam(webcam_seconds, source)
+                    run_scan(source, "Live webcam", use_caption)
+                except Exception as exc:
+                    st.exception(exc)
 
-        if video_result.get("vision_error"):
-            st.warning(
-                f"LOCAL FINDINGS ONLY. {video_result['vision_error']} "
-                "[OpenAI API billing settings](https://platform.openai.com/settings/organization/billing/)."
-            )
+        result = st.session_state.get("last_scan")
+        if result:
+            st.subheader("Latest screening result")
+            cols = st.columns(4)
+            cols[0].metric("Flagged frames", f"{result['threat_percent']:.1f}%")
+            cols[1].metric("Peak confidence", f"{result['peak_confidence']:.1%}")
+            cols[2].metric("Incident started", result["incident_start"] or "None")
+            cols[3].metric("Incident ended", result["incident_end"] or "None")
+            st.write(result["summary"])
+            st.caption(f"Analyzed {result['frame_count']} frames • {result['duration_seconds']:.1f} sec • threshold {ALERT_THRESHOLD:.0f}%")
+            st.info(result["alert_message"])
+            if result.get("snapshot_path") and Path(result["snapshot_path"]).exists():
+                st.image(result["snapshot_path"], caption="Highest-scoring flagged frame")
+            if result.get("annotated_path") and Path(result["annotated_path"]).exists():
+                st.video(result["annotated_path"])
+            if result.get("object_counts"):
+                st.write("Detector observations:", result["object_counts"])
+            st.caption("The percentage is the fraction of frames flagged by a simple heuristic. It is not a calibrated probability or a finding that an offense occurred.")
 
-        with st.expander("Frame-by-frame details and overall summary", expanded=True):
-            summaries = video_result.get("frame_summaries", [])
-            if video_result.get("summary_source") == "LOCAL_CV":
-                st.markdown("**Summary source: LOCAL COMPUTER VISION ONLY (not an LLM response)**")
-                st.caption(
-                    f"One local-cue line per sampled frame, at most 1 per second "
-                    f"({len(summaries)} frames). "
-                    "These movement cues do not identify a fight or determine intent."
-                )
-            else:
-                st.markdown("**Summary source: OpenAI vision analysis**")
-                st.caption(
-                    f"One line per sampled frame, at most 1 per second "
-                    f"({len(summaries)} frames summarized)."
-                )
-            if summaries:
-                for index, frame_summary in enumerate(summaries, start=1):
-                    timestamp = float(frame_summary.get("timestamp_seconds", 0))
-                    observation = frame_summary.get("observation", "No observation returned.")
-                    observation = " ".join(observation.splitlines())
-                    st.markdown(f"**{index}. {timestamp:.1f}s** — {observation}")
-            else:
-                if video_result.get("vision_error"):
-                    st.info("No visual frame descriptions were generated because the vision request did not run.")
-                else:
-                    st.info("The vision model did not return frame descriptions.")
-            st.markdown("**Overall video summary**")
-            if video_result.get("video_summary"):
-                st.write(video_result["video_summary"])
-            elif video_result.get("vision_error"):
-                st.info("No visual summary was generated because the vision request did not run.")
-            else:
-                st.info("The vision model did not return an overall summary.")
+    with tab_plans:
+        st.subheader("Demo subscription tiers")
+        columns = st.columns(3)
+        for col, (name, details) in zip(columns, db.PLANS.items()):
+            with col:
+                st.markdown(f"### {name}")
+                st.write("Free" if details["price"] == 0 else f"${details['price']}/month (mock payment)")
+                st.write(f"{details['monthly_scans']} scans per month")
+                if st.button(f"Select {name}", key=f"plan_{name}"):
+                    db.set_plan(user_id, name)
+                    st.success(f"Plan set to {name} (demo; no charge).")
+                    st.rerun()
+        st.caption("This dissertation demo stores plan selection locally. It does not process payments.")
 
-    if video_result["processor_output"]:
-        with st.expander("Technical processing log", expanded=False):
-            st.code(video_result["processor_output"][-20000:])
+    with tab_history:
+        st.subheader("Emergency alert history")
+        records = db.incident_history(user_id)
+        if not records:
+            st.write("No scans recorded yet.")
+        for row in records:
+            with st.expander(f"{row.created_at:%Y-%m-%d %H:%M} • {row.source_name} • {row.threat_percent:.1f}%"):
+                st.write(row.summary)
+                st.write(f"Start: {row.incident_start or '—'} · End: {row.incident_end or '—'} · Peak confidence: {row.peak_confidence:.1%}")
+                st.write("Email alert sent" if row.alerted else "No email alert sent")
+                if row.snapshot_path and Path(row.snapshot_path).exists():
+                    st.image(row.snapshot_path, width=400)
 
-    returncode = video_result["returncode"]
-    if returncode is not None and returncode != 0:
-        st.error(f"Video processing exited with code {returncode}.")
-        with st.expander("Error details", expanded=True):
-            st.code(video_result["processor_output"][-20000:] or "The processor returned no error text.")
-    elif returncode is None or not result_video:
-        st.error("Video processing failed.")
-        with st.expander("Error details", expanded=True):
-            st.code(video_result["processor_output"][-20000:] or "No error details were produced.")
+
+if "user_id" not in st.session_state:
+    login_view()
+else:
+    dashboard()
