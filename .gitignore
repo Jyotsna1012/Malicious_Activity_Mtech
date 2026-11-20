@@ -33,6 +33,10 @@ model/
 # Generated processed videos and runtime logs
 *_annotated.mp4
 *.log
+incident_system.db
+user_data/
+*.pt
+*.safetensors
 
 # Build output
 build/
