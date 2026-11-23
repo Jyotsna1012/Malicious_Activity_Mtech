@@ -29,6 +29,8 @@ VIOLENT_TOKENS = (
     "kick", "kicking", "slap", "slapping", "hitting", "martial arts", "karate",
     "judo", "headbutt", "brawl", "brawling", "choking", "strangling",
 )
+MIN_ACTION_RAM_GIB = float(os.getenv("MIN_ACTION_RAM_GIB", "4"))
+MIN_VLM_RAM_GIB = float(os.getenv("MIN_VLM_RAM_GIB", "9"))
 POSE_JOINTS = {"left_shoulder": 5, "right_shoulder": 6, "left_elbow": 7,
                "right_elbow": 8, "left_wrist": 9, "right_wrist": 10,
                "left_hip": 11, "right_hip": 12, "left_knee": 13,
@@ -45,6 +47,31 @@ class PersonPose:
 def _mmss(seconds: float) -> str:
     total = max(0, int(seconds))
     return f"{total // 60:02d}:{total % 60:02d}"
+
+
+def _available_ram_bytes() -> int:
+    """Return the lower of host-available RAM and the current cgroup headroom."""
+    import psutil
+
+    available = int(psutil.virtual_memory().available)
+    cgroup_files = (
+        (Path("/sys/fs/cgroup/memory.max"), Path("/sys/fs/cgroup/memory.current")),
+        (Path("/sys/fs/cgroup/memory/memory.limit_in_bytes"),
+         Path("/sys/fs/cgroup/memory/memory.usage_in_bytes")),
+    )
+    for limit_path, usage_path in cgroup_files:
+        try:
+            raw_limit = limit_path.read_text(encoding="ascii").strip()
+            if raw_limit == "max":
+                continue
+            limit, usage = int(raw_limit), int(usage_path.read_text(encoding="ascii").strip())
+            # cgroup v1 uses a very large sentinel when there is no effective cap.
+            if 0 < limit < 1 << 60:
+                available = min(available, max(0, limit-usage))
+                break
+        except (OSError, ValueError):
+            continue
+    return available
 
 
 def _iou(a: tuple[float, ...], b: tuple[float, ...]) -> float:
@@ -119,15 +146,16 @@ def _kinematic_score(people: list[PersonPose], previous: list[PersonPose],
 
 def _load_action_model(device: str):
     import torch
-    import psutil
-    from transformers import VideoMAEForVideoClassification, VideoMAEImageProcessor
 
-    minimum_ram = float(os.getenv("MIN_ACTION_RAM_GIB", "3")) * 1024**3
-    if device == "cpu" and psutil.virtual_memory().available < minimum_ram:
+    minimum_ram = MIN_ACTION_RAM_GIB * 1024**3
+    if device == "cpu" and _available_ram_bytes() < minimum_ram:
         raise MemoryError(
             f"VideoMAE analysis needs at least {minimum_ram / 1024**3:.1f} GiB of free RAM. "
             "This hosted instance is too small; run the scan locally or use a larger instance."
         )
+    # Import transformers only after the container-memory preflight. Importing
+    # it eagerly can itself push a small Streamlit container into an OOM restart.
+    from transformers import VideoMAEForVideoClassification, VideoMAEImageProcessor
     dtype = torch.float16 if device == "cuda" else torch.float32
     processor = VideoMAEImageProcessor.from_pretrained(ACTION_MODEL_ID)
     model = VideoMAEForVideoClassification.from_pretrained(
@@ -158,18 +186,17 @@ def _classify_window(frames: list[np.ndarray], processor, model, torch, device: 
 
 def _load_vlm():
     import torch
-    import psutil
-    from transformers import AutoProcessor, Qwen2VLForConditionalGeneration
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
     if device == "cpu":
-        required_memory = 9 * 1024**3
-        available_memory = psutil.virtual_memory().available
+        required_memory = MIN_VLM_RAM_GIB * 1024**3
+        available_memory = _available_ram_bytes()
         if available_memory < required_memory:
             raise MemoryError(
                 "Qwen2-VL 2B CPU inference needs about 9 GiB of free RAM. "
                 "Disable the optional storyboard summary or run locally on a larger machine."
             )
+    from transformers import AutoProcessor, Qwen2VLForConditionalGeneration
     load_options = {"torch_dtype": torch.float16 if device == "cuda" else torch.float32}
     model = None
     if device == "cuda":
@@ -268,6 +295,20 @@ def analyze_video(video_path: str | Path | int, output_path: str | Path | None =
     camera index; set ``live_seconds`` to bound the capture duration.
     """
     import torch
+
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    if device == "cpu":
+        required_memory = MIN_ACTION_RAM_GIB * 1024**3
+        available_memory = _available_ram_bytes()
+        if available_memory < required_memory:
+            raise RuntimeError(
+                f"Video analysis needs at least {MIN_ACTION_RAM_GIB:.1f} GiB of free RAM; "
+                f"this app container currently has {available_memory / 1024**3:.1f} GiB. "
+                "The scan was stopped before loading AI models to keep the app online. "
+                "Run it on a local computer or use a larger Streamlit instance."
+            )
+
+    # Delay the heavyweight Ultralytics import until after the cgroup RAM check.
     from ultralytics import YOLO
 
     live_input = isinstance(video_path, int)
@@ -278,7 +319,6 @@ def analyze_video(video_path: str | Path | int, output_path: str | Path | None =
     if not np.isfinite(fps) or fps <= 0:
         fps = 25.0
     total_hint = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
-    device = "cuda" if torch.cuda.is_available() else "cpu"
     try:
         pose_model = YOLO(POSE_MODEL_ID)
         weapon_model = YOLO(WEAPON_MODEL_ID) if WEAPON_MODEL_ID else None
