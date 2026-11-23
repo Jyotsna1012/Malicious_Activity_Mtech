@@ -55,7 +55,7 @@ def login_page() -> None:
 
 
 def run_scan(source: Path | int, source_name: str, *, live_seconds: int | None = None,
-             enable_vlm: bool = True) -> None:
+             enable_vlm: bool = False) -> None:
     user_id = st.session_state.user_id
     db.assert_quota_available(user_id)
     evidence_dir = DATA_DIR / "evidence" / str(user_id)
@@ -132,13 +132,13 @@ def show_result(result: dict) -> None:
 
 def analyzer_page(user_id: int, plan: str, used: int, allowance: int | None) -> None:
     st.header("Threat analyzer")
-    st.caption("Pose kinematics find candidate interactions; VideoMAE evaluates 16-frame windows; Qwen2-VL summarizes a local four-frame storyboard.")
+    st.caption("Pose kinematics find candidate interactions; VideoMAE evaluates 16-frame windows. Qwen2-VL can optionally summarize the storyboard when sufficient memory is available.")
     if allowance is not None and used >= allowance:
         st.warning("Monthly scan limit reached. Choose another tier to continue.")
     disabled = allowance is not None and used >= allowance
     uploaded = st.file_uploader("Upload MP4 or AVI video", type=["mp4", "avi"], disabled=disabled)
-    enable_vlm = st.checkbox("Generate a local Qwen2-VL storyboard summary", value=True,
-                             help="The 2B vision model is large and may be slow, especially on CPU.")
+    enable_vlm = st.checkbox("Generate a local Qwen2-VL storyboard summary", value=False,
+                             help="This optional 2B model needs substantial free RAM. It is off by default to keep hosted deployments responsive.")
     if uploaded and st.button("Analyze uploaded video", type="primary", disabled=disabled, key="analyze_upload"):
         if uploaded.size > 500*1024*1024:
             st.error("Maximum upload size is 500 MB.")

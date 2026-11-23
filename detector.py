@@ -119,11 +119,20 @@ def _kinematic_score(people: list[PersonPose], previous: list[PersonPose],
 
 def _load_action_model(device: str):
     import torch
+    import psutil
     from transformers import VideoMAEForVideoClassification, VideoMAEImageProcessor
 
+    minimum_ram = float(os.getenv("MIN_ACTION_RAM_GIB", "3")) * 1024**3
+    if device == "cpu" and psutil.virtual_memory().available < minimum_ram:
+        raise MemoryError(
+            f"VideoMAE analysis needs at least {minimum_ram / 1024**3:.1f} GiB of free RAM. "
+            "This hosted instance is too small; run the scan locally or use a larger instance."
+        )
     dtype = torch.float16 if device == "cuda" else torch.float32
     processor = VideoMAEImageProcessor.from_pretrained(ACTION_MODEL_ID)
-    model = VideoMAEForVideoClassification.from_pretrained(ACTION_MODEL_ID, torch_dtype=dtype)
+    model = VideoMAEForVideoClassification.from_pretrained(
+        ACTION_MODEL_ID, torch_dtype=dtype, low_cpu_mem_usage=True
+    )
     model.eval().to(device)
     return processor, model, torch
 
@@ -149,9 +158,18 @@ def _classify_window(frames: list[np.ndarray], processor, model, torch, device: 
 
 def _load_vlm():
     import torch
+    import psutil
     from transformers import AutoProcessor, Qwen2VLForConditionalGeneration
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
+    if device == "cpu":
+        required_memory = 9 * 1024**3
+        available_memory = psutil.virtual_memory().available
+        if available_memory < required_memory:
+            raise MemoryError(
+                "Qwen2-VL 2B CPU inference needs about 9 GiB of free RAM. "
+                "Disable the optional storyboard summary or run locally on a larger machine."
+            )
     load_options = {"torch_dtype": torch.float16 if device == "cuda" else torch.float32}
     model = None
     if device == "cuda":
@@ -240,8 +258,8 @@ def _incident_runs(mask: list[bool], timestamps: list[float], merge_gap_seconds:
 
 def analyze_video(video_path: str | Path | int, output_path: str | Path | None = None,
                   snapshot_path: str | Path | None = None, progress_callback=None,
-                  use_caption_model: bool = True, *, live_seconds: int | None = None,
-                  frame_callback: Callable | None = None, enable_vlm: bool = True,
+                  use_caption_model: bool = False, *, live_seconds: int | None = None,
+                  frame_callback: Callable | None = None, enable_vlm: bool = False,
                   action_threshold: float = ACTION_THRESHOLD) -> dict:
     """Run pose candidates, 16-frame VideoMAE windows and optional Qwen storyboard.
 
