@@ -149,9 +149,14 @@ def dashboard():
             cols[1].metric("Peak confidence", f"{result['peak_confidence']:.1%}")
             cols[2].metric("Incident started", result["incident_start"] or "None")
             cols[3].metric("Incident ended", result["incident_end"] or "None")
-            st.write(result["summary"])
+            if result.get("possible_fight"):
+                st.warning(result["summary"], icon="⚠️")
+            elif result["threat_percent"] > 0:
+                st.info(result["summary"])
+            else:
+                st.success(result["summary"])
             st.caption(f"Analyzed {result['frame_count']} frames • {result['duration_seconds']:.1f} sec • threshold {ALERT_THRESHOLD:.0f}%")
-            st.info(result["alert_message"])
+            st.caption(f"Email alert status: {result['alert_message']}")
             if result.get("snapshot_path") and Path(result["snapshot_path"]).exists():
                 st.image(result["snapshot_path"], caption="Highest-scoring flagged frame")
             if result.get("annotated_path") and Path(result["annotated_path"]).exists():

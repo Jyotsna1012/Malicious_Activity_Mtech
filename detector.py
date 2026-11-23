@@ -52,7 +52,7 @@ def analyze_video(
     model = YOLO(DEFAULT_YOLO_MODEL)  # Ultralytics fetches its open weights on first use.
     captioner = _load_captioner() if use_caption_model else None
     writer = None
-    frame_count = flagged_count = 0
+    frame_count = flagged_count = motion_flagged_count = 0
     peak_confidence = 0.0
     incident_start = incident_end = None
     incident_runs = []
@@ -61,7 +61,6 @@ def analyze_video(
     keyframes = []
     recent_people = deque(maxlen=2)
     object_counts = {}
-    sample_captions = []
     width = height = 0
 
     try:
@@ -105,6 +104,8 @@ def analyze_video(
                 ) < 0.12
 
             flagged = bool(suspicious) or (rapid_motion and close_interaction)
+            if rapid_motion and close_interaction:
+                motion_flagged_count += 1
             confidence = max(max_object_conf, 0.45 + min(0.45, (0.2 if rapid_motion else 0) + (0.2 if close_interaction else 0))) if flagged else 0.0
             if flagged:
                 flagged_count += 1
@@ -162,26 +163,33 @@ def analyze_video(
         caption_text = " ".join(captions)
 
     if flagged_count:
-        labels = sorted({label for _, _, labs in keyframes for label in labs})
+        labels = sorted(object_counts)
+        motion_flagged = motion_flagged_count > 0
+        descriptions = []
+        if motion_flagged:
+            descriptions.append("possible fight or physical altercation based on rapid movement and close proximity between people")
         if labels:
-            event_text = "objects flagged by the detector: " + ", ".join(labels)
-        elif caption_text:
-            event_text = "the local image captioner described: " + caption_text
-        else:
-            event_text = "rapid movement and close person proximity were flagged by a simple motion heuristic"
-        summary = (f"The local video scan flagged {flagged_count} of {frame_count} frames "
-                   f"({threat_percent:.1f}%) as potentially noteworthy. {event_text}. "
-                   "This is an automated screening result and requires human review; it does not establish a crime or intent.")
+            descriptions.append("detected objects: " + ", ".join(labels))
+        if caption_text:
+            descriptions.append("image caption: " + caption_text)
+        if not descriptions:
+            descriptions.append("activity was flagged by the local screening heuristic")
+        event_text = "; ".join(descriptions)
+        summary = (f"Possible noteworthy activity detected. {event_text}. The scan flagged "
+                   f"{flagged_count} of {frame_count} frames ({threat_percent:.1f}%). "
+                   "This is an automated screening cue for human review, not a confirmed finding.")
     else:
-        summary = (f"The local video scan did not flag activity in {frame_count} analyzed frames. "
-                   "This does not rule out an incident, because the detector can miss actions and objects.")
+        summary = (f"No noteworthy activity was flagged in {frame_count} analyzed frames. "
+                   "The detector can miss actions and objects, so this does not rule out an incident.")
     return {
         "frame_count": frame_count, "duration_seconds": (frame_count-1) / fps,
         "threat_percent": threat_percent, "peak_confidence": peak_confidence,
         "incident_start": _mmss(incident_start) if incident_start is not None else None,
         "incident_end": _mmss(incident_end) if incident_end is not None else None,
         "incident_runs": [(_mmss(a), _mmss(b)) for a, b in incident_runs],
-        "summary": summary, "object_counts": object_counts,
+        "summary": summary,
+        "possible_fight": bool(flagged_count and motion_flagged_count),
+        "object_counts": object_counts,
         "keyframes": [(t, cv2.cvtColor(img, cv2.COLOR_BGR2RGB), labs) for t, img, labs in keyframes],
         "video_path": str(output_path) if output_path and Path(output_path).exists() else None,
     }
