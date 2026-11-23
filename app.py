@@ -1,4 +1,4 @@
-"""Streamlit dashboard for the local malicious-activity screening demo."""
+"""Streamlit customer portal for local temporal activity screening."""
 from __future__ import annotations
 
 import os
@@ -8,12 +8,15 @@ from pathlib import Path
 
 import cv2
 import streamlit as st
-
-import database as db
-from alerts import ALERT_THRESHOLD, send_incident_alert
-from detector import analyze_video
+from dotenv import load_dotenv
 
 ROOT = Path(__file__).resolve().parent
+load_dotenv(ROOT / ".env")
+
+import database as db
+from alerts import send_incident_alert
+from detector import analyze_video
+
 DATA_DIR = Path(os.getenv("APP_DATA_DIR", ROOT / "user_data"))
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 db.init_db()
@@ -21,9 +24,9 @@ db.init_db()
 st.set_page_config(page_title="Local Activity Screening", page_icon="🛡️", layout="wide")
 
 
-def login_view():
+def login_page() -> None:
     st.title("🛡️ AI-Powered Activity Screening")
-    st.caption("Local open-source computer vision • SQLite demo portal")
+    st.caption("Temporal video analysis runs on locally downloaded open-source models.")
     login_tab, signup_tab = st.tabs(["Log in", "Create account"])
     with login_tab:
         with st.form("login_form"):
@@ -33,8 +36,7 @@ def login_view():
         if submitted:
             user = db.authenticate(email, password)
             if user:
-                st.session_state.user_id = user.id
-                st.session_state.email = user.email
+                st.session_state.user_id, st.session_state.email = user.id, user.email
                 st.rerun()
             st.error("Email or password is incorrect.")
     with signup_tab:
@@ -47,153 +49,191 @@ def login_view():
             if error:
                 st.error(error)
             else:
-                st.session_state.user_id = user.id
-                st.session_state.email = user.email
+                st.session_state.user_id, st.session_state.email = user.id, user.email
                 st.success("Account created on the Basic plan.")
                 st.rerun()
 
 
-def capture_webcam(seconds: int, destination: Path) -> None:
-    """Capture a short clip from the server's default camera for local demos."""
-    camera = cv2.VideoCapture(0)
-    if not camera.isOpened():
-        raise RuntimeError("Could not open webcam 0 on the machine running Streamlit.")
-    fps = camera.get(cv2.CAP_PROP_FPS) or 20.0
-    fps = min(max(fps, 5.0), 30.0)
-    width = int(camera.get(cv2.CAP_PROP_FRAME_WIDTH) or 640)
-    height = int(camera.get(cv2.CAP_PROP_FRAME_HEIGHT) or 480)
-    writer = cv2.VideoWriter(str(destination), cv2.VideoWriter_fourcc(*"mp4v"), fps, (width, height))
-    if not writer.isOpened():
-        camera.release()
-        raise RuntimeError("Could not create webcam recording.")
-    deadline = time.monotonic() + seconds
-    try:
-        while time.monotonic() < deadline:
-            ok, frame = camera.read()
-            if ok:
-                writer.write(frame)
-    finally:
-        camera.release()
-        writer.release()
-
-
-def run_scan(source: Path, source_name: str, use_caption: bool):
+def run_scan(source: Path | int, source_name: str, *, live_seconds: int | None = None,
+             enable_vlm: bool = True) -> None:
     user_id = st.session_state.user_id
+    db.assert_quota_available(user_id)
     evidence_dir = DATA_DIR / "evidence" / str(user_id)
     evidence_dir.mkdir(parents=True, exist_ok=True)
     token = f"scan_{int(time.time())}"
-    snapshot = evidence_dir / f"{token}.jpg"
+    storyboard = evidence_dir / f"{token}_storyboard.jpg"
     annotated = evidence_dir / f"{token}_annotated.mp4"
-    progress = st.progress(0, text="Loading local detection model…")
+    progress = st.progress(0, text="Loading local pose and action models…")
+    live_preview = st.empty()
+    live_status = st.empty()
+
+    def update_progress(value: float, message: str = "Analyzing locally") -> None:
+        progress.progress(min(max(value, 0.0), 1.0), text=message)
+
+    def update_preview(frame, timestamp: float, score: float, status: str) -> None:
+        live_preview.image(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB), channels="RGB",
+                           caption=f"Live pose screen at {timestamp:.1f}s")
+        live_status.info(f"{status} · kinematic cue {score:.0%} · {timestamp:.1f}s")
+
     try:
         result = analyze_video(
-            source, output_path=annotated, snapshot_path=snapshot,
-            progress_callback=lambda value: progress.progress(min(value, 1.0), text="Analyzing video locally…"),
-            use_caption_model=use_caption,
+            source, output_path=annotated, snapshot_path=storyboard,
+            progress_callback=update_progress, live_seconds=live_seconds,
+            frame_callback=update_preview if isinstance(source, int) else None,
+            use_caption_model=enable_vlm, enable_vlm=enable_vlm,
         )
     finally:
         progress.empty()
-    alerted, alert_message = send_incident_alert(st.session_state.email, result, str(snapshot) if snapshot.exists() else None)
-    record = db.save_incident(user_id, result, source_name, str(snapshot) if snapshot.exists() else None, alerted)
-    st.session_state.last_scan = {**result, "snapshot_path": str(snapshot), "annotated_path": result["video_path"], "alert_message": alert_message, "incident_id": record.id}
+        live_status.empty()
+    threshold = db.get_alert_threshold(user_id)
+    evidence_path = result.get("storyboard_path")
+    alerted, alert_message = send_incident_alert(
+        st.session_state.email, result, evidence_path, threshold=threshold
+    )
+    record = db.save_incident(user_id, result, source_name, evidence_path, alerted)
+    st.session_state.last_scan = {
+        **result, "snapshot_path": evidence_path, "annotated_path": result["video_path"],
+        "alert_message": alert_message, "incident_id": record.id,
+    }
 
 
-def dashboard():
+def show_result(result: dict) -> None:
+    st.subheader("Latest screening result")
+    columns = st.columns(5)
+    columns[0].metric("Malicious frames", f"{result['malicious_frames']}/{result['frame_count']}")
+    columns[1].metric("Threat percentage", f"{result['threat_percent']:.1f}%")
+    columns[2].metric("Peak threat score", f"{result['peak_confidence']:.1%}")
+    columns[3].metric("Incident start", result["incident_start"] or "None")
+    columns[4].metric("Incident end", result["incident_end"] or "None")
+    if result.get("possible_fight"):
+        st.warning(result["summary"], icon="⚠️")
+    elif result["threat_percent"]:
+        st.info(result["summary"])
+    else:
+        st.success(result["summary"])
+    st.caption(f"Action model: {result['action_model']} · Inference device: {result['device']}")
+    st.caption(f"Email alert status: {result['alert_message']}")
+    if result.get("action_labels"):
+        st.write("Detected temporal action labels:", result["action_labels"])
+    elif result.get("top_action_labels"):
+        st.write("Candidate-window action descriptions:", result["top_action_labels"])
+    if result.get("object_counts"):
+        st.write("Custom object detector labels:", result["object_counts"])
+    if result.get("incident_runs"):
+        st.markdown("**Incident timeline**")
+        for run in result["incident_runs"]:
+            st.write(f"{run['start']}–{run['end']} ({run['start_seconds']:.2f}s–{run['end_seconds']:.2f}s)")
+    if result.get("snapshot_path") and Path(result["snapshot_path"]).is_file():
+        st.image(result["snapshot_path"], caption="Four-frame storyboard evidence", width="stretch")
+    if result.get("annotated_path") and Path(result["annotated_path"]).is_file():
+        st.video(result["annotated_path"])
+    st.caption("Screening cues can be wrong or incomplete. Review the source video and evidence; this does not establish a crime or intent.")
+
+
+def analyzer_page(user_id: int, plan: str, used: int, allowance: int | None) -> None:
+    st.header("Threat analyzer")
+    st.caption("Pose kinematics find candidate interactions; VideoMAE evaluates 16-frame windows; Qwen2-VL summarizes a local four-frame storyboard.")
+    if allowance is not None and used >= allowance:
+        st.warning("Monthly scan limit reached. Choose another tier to continue.")
+    disabled = allowance is not None and used >= allowance
+    uploaded = st.file_uploader("Upload MP4 or AVI video", type=["mp4", "avi"], disabled=disabled)
+    enable_vlm = st.checkbox("Generate a local Qwen2-VL storyboard summary", value=True,
+                             help="The 2B vision model is large and may be slow, especially on CPU.")
+    if uploaded and st.button("Analyze uploaded video", type="primary", disabled=disabled, key="analyze_upload"):
+        if uploaded.size > 500*1024*1024:
+            st.error("Maximum upload size is 500 MB.")
+        else:
+            try:
+                with tempfile.TemporaryDirectory(prefix="activity_scan_") as temp_dir:
+                    source = Path(temp_dir) / Path(uploaded.name).name
+                    source.write_bytes(uploaded.getbuffer())
+                    run_scan(source, uploaded.name, enable_vlm=enable_vlm)
+            except Exception as exc:
+                st.error(f"Video analysis failed: {exc}")
+    if db.PLANS[plan]["live_webcam"]:
+        duration = st.slider("Server webcam analysis duration (seconds)", 10, 120, 30, 5)
+        if st.button("Start live webcam analysis", disabled=disabled, key="live_webcam"):
+            try:
+                with st.spinner("Opening the webcam attached to the Streamlit host…"):
+                    run_scan(0, "Live server webcam", live_seconds=duration, enable_vlm=enable_vlm)
+            except Exception as exc:
+                st.error(f"Webcam analysis failed: {exc}")
+    else:
+        st.caption("Live webcam analysis is available on Pro and Enterprise plans.")
+    latest = st.session_state.get("last_scan")
+    if latest:
+        show_result(latest)
+
+
+def subscription_page(user_id: int, plan: str, used: int, allowance: int | None) -> None:
+    st.header("Subscription plans")
+    st.caption("Plan upgrades use a simulated checkout. No payment is taken.")
+    columns = st.columns(3)
+    for column, (name, details) in zip(columns, db.PLANS.items()):
+        with column:
+            st.markdown(f"### {name}")
+            st.write("Free" if details["price"] == 0 else f"${details['price']}/month (mock checkout)")
+            st.write("Unlimited scans" if details["monthly_scans"] is None else f"{details['monthly_scans']} scans/month")
+            st.write("Live webcam: " + ("Included" if details["live_webcam"] else "Not included"))
+            st.write("Custom alert threshold: " + ("Included" if details["custom_threshold"] else "20% default"))
+            if st.button("Current plan" if plan == name else f"Upgrade to {name}", key=f"plan_{name}", disabled=plan == name):
+                db.set_plan(user_id, name)
+                st.success(f"Plan updated to {name} (simulated checkout).")
+                st.rerun()
+    st.caption(f"Usage this month: {used}/{'Unlimited' if allowance is None else allowance}")
+    if plan == "Enterprise":
+        threshold = db.get_alert_threshold(user_id)
+        with st.form("enterprise_threshold"):
+            value = st.slider("Email alert threshold (%)", 1.0, 100.0, float(threshold), 1.0)
+            if st.form_submit_button("Save alert threshold"):
+                db.set_alert_threshold(user_id, value)
+                st.success("Alert threshold saved.")
+
+
+def history_page(user_id: int) -> None:
+    st.header("Incident history")
+    records = db.incident_history(user_id)
+    if not records:
+        st.info("No scans recorded yet.")
+        return
+    for row in records:
+        title = f"{row.created_at:%Y-%m-%d %H:%M} · {row.source_name} · {row.threat_percent:.1f}%"
+        with st.expander(title):
+            st.write(row.summary)
+            st.write(f"Peak score: {row.peak_confidence:.1%} · Email alert sent: {'Yes' if row.alerted else 'No'}")
+            if row.action_labels:
+                st.write("Action labels:", row.action_labels)
+            if row.top_action_labels:
+                st.write("Candidate-window descriptions:", row.top_action_labels)
+            for run in row.incident_runs:
+                st.write(f"Incident: {run['start']}–{run['end']}")
+            evidence = row.storyboard_path or row.snapshot_path
+            if evidence and Path(evidence).is_file():
+                st.image(evidence, caption="Incident storyboard", width=700)
+
+
+def dashboard() -> None:
     user_id = st.session_state.user_id
     plan, used, allowance = db.get_usage(user_id)
     with st.sidebar:
         st.write(f"Signed in as **{st.session_state.email}**")
         st.write(f"Plan: **{plan}**")
-        st.caption(f"Scans this month: {used}/{allowance}")
+        st.caption(f"Scans this month: {used}/{'Unlimited' if allowance is None else allowance}")
+        page = st.radio("Portal", ["Threat analyzer", "Subscription", "Incident history"])
         if st.button("Log out"):
             st.session_state.clear()
             st.rerun()
     st.title("AI-Powered Malicious Activity Detection & Alert System")
-    st.caption("Local inference using open-source models. Results are screening cues and require human review.")
-    tab_scan, tab_plans, tab_history = st.tabs(["Video analysis", "Subscription", "Emergency alert history"])
-
-    with tab_scan:
-        st.info("The default YOLOv8 nano weights run locally after the first download. Optional BLIP captions use a local Hugging Face model and may need several GB of RAM.")
-        if used >= allowance:
-            st.warning("Monthly scan limit reached. Upgrade your plan to continue.")
-        upload, webcam = st.columns(2)
-        uploaded = upload.file_uploader("Upload an MP4 or AVI clip", type=["mp4", "avi"], disabled=used >= allowance)
-        use_caption = st.checkbox("Generate optional local image captions (downloads BLIP weights)")
-        if uploaded and upload.button("Analyze uploaded video", type="primary", disabled=used >= allowance):
-            if uploaded.size > 500 * 1024 * 1024:
-                st.error("Maximum upload size is 500 MB.")
-            else:
-                with tempfile.TemporaryDirectory(prefix="local_scan_") as tmp:
-                    source = Path(tmp) / Path(uploaded.name).name
-                    source.write_bytes(uploaded.getbuffer())
-                    try:
-                        run_scan(source, uploaded.name, use_caption)
-                    except Exception as exc:
-                        st.exception(exc)
-        webcam_seconds = webcam.slider("Webcam capture length (seconds)", 5, 30, 10)
-        if webcam.button("Capture and analyze server webcam", disabled=used >= allowance):
-            with tempfile.TemporaryDirectory(prefix="webcam_scan_") as tmp:
-                source = Path(tmp) / "webcam.mp4"
-                try:
-                    with st.spinner("Recording from the webcam connected to the Streamlit host…"):
-                        capture_webcam(webcam_seconds, source)
-                    run_scan(source, "Live webcam", use_caption)
-                except Exception as exc:
-                    st.exception(exc)
-
-        result = st.session_state.get("last_scan")
-        if result:
-            st.subheader("Latest screening result")
-            cols = st.columns(4)
-            cols[0].metric("Flagged frames", f"{result['threat_percent']:.1f}%")
-            cols[1].metric("Peak confidence", f"{result['peak_confidence']:.1%}")
-            cols[2].metric("Incident started", result["incident_start"] or "None")
-            cols[3].metric("Incident ended", result["incident_end"] or "None")
-            if result.get("possible_fight"):
-                st.warning(result["summary"], icon="⚠️")
-            elif result["threat_percent"] > 0:
-                st.info(result["summary"])
-            else:
-                st.success(result["summary"])
-            st.caption(f"Analyzed {result['frame_count']} frames • {result['duration_seconds']:.1f} sec • threshold {ALERT_THRESHOLD:.0f}%")
-            st.caption(f"Email alert status: {result['alert_message']}")
-            if result.get("snapshot_path") and Path(result["snapshot_path"]).exists():
-                st.image(result["snapshot_path"], caption="Highest-scoring flagged frame")
-            if result.get("annotated_path") and Path(result["annotated_path"]).exists():
-                st.video(result["annotated_path"])
-            if result.get("object_counts"):
-                st.write("Detector observations:", result["object_counts"])
-            st.caption("The percentage is the fraction of frames flagged by a simple heuristic. It is not a calibrated probability or a finding that an offense occurred.")
-
-    with tab_plans:
-        st.subheader("Demo subscription tiers")
-        columns = st.columns(3)
-        for col, (name, details) in zip(columns, db.PLANS.items()):
-            with col:
-                st.markdown(f"### {name}")
-                st.write("Free" if details["price"] == 0 else f"${details['price']}/month (mock payment)")
-                st.write(f"{details['monthly_scans']} scans per month")
-                if st.button(f"Select {name}", key=f"plan_{name}"):
-                    db.set_plan(user_id, name)
-                    st.success(f"Plan set to {name} (demo; no charge).")
-                    st.rerun()
-        st.caption("This dissertation demo stores plan selection locally. It does not process payments.")
-
-    with tab_history:
-        st.subheader("Emergency alert history")
-        records = db.incident_history(user_id)
-        if not records:
-            st.write("No scans recorded yet.")
-        for row in records:
-            with st.expander(f"{row.created_at:%Y-%m-%d %H:%M} • {row.source_name} • {row.threat_percent:.1f}%"):
-                st.write(row.summary)
-                st.write(f"Start: {row.incident_start or '—'} · End: {row.incident_end or '—'} · Peak confidence: {row.peak_confidence:.1%}")
-                st.write("Email alert sent" if row.alerted else "No email alert sent")
-                if row.snapshot_path and Path(row.snapshot_path).exists():
-                    st.image(row.snapshot_path, width=400)
+    st.caption("Local inference only. No paid API keys are used.")
+    if page == "Threat analyzer":
+        analyzer_page(user_id, plan, used, allowance)
+    elif page == "Subscription":
+        subscription_page(user_id, plan, used, allowance)
+    else:
+        history_page(user_id)
 
 
 if "user_id" not in st.session_state:
-    login_view()
+    login_page()
 else:
     dashboard()

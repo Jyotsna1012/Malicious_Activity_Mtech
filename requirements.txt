@@ -1,7 +1,14 @@
-# Install PyTorch from https://pytorch.org/get-started/locally/ for your CPU/CUDA setup.
-streamlit>=1.40,<2.0
+# Install the PyTorch wheel matching your CPU/CUDA from pytorch.org first.
+torch>=2.2
+torchvision>=0.17
+streamlit>=1.50,<2.0
 SQLAlchemy>=2.0,<3.0
 ultralytics>=8.3,<9.0
 opencv-python>=4.10,<5.0
-transformers>=4.44,<5.0
-pillow>=10.0,<12.0
+transformers>=4.49,<5.0
+accelerate>=0.34
+qwen-vl-utils>=0.0.8
+pillow>=10.0,<13.0
+numpy>=1.26,<3.0
+av>=12.0
+python-dotenv>=1.0
