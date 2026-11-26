@@ -24,36 +24,6 @@ db.init_db()
 st.set_page_config(page_title="Local Activity Screening", page_icon="🛡️", layout="wide")
 
 
-def login_page() -> None:
-    st.title("🛡️ AI-Powered Activity Screening")
-    st.caption("Temporal video analysis runs on locally downloaded open-source models.")
-    login_tab, signup_tab = st.tabs(["Log in", "Create account"])
-    with login_tab:
-        with st.form("login_form"):
-            email = st.text_input("Email", key="login_email")
-            password = st.text_input("Password", type="password", key="login_password")
-            submitted = st.form_submit_button("Log in", type="primary")
-        if submitted:
-            user = db.authenticate(email, password)
-            if user:
-                st.session_state.user_id, st.session_state.email = user.id, user.email
-                st.rerun()
-            st.error("Email or password is incorrect.")
-    with signup_tab:
-        with st.form("signup_form"):
-            email = st.text_input("Email address", key="signup_email")
-            password = st.text_input("Password (at least 8 characters)", type="password", key="signup_password")
-            submitted = st.form_submit_button("Create account", type="primary")
-        if submitted:
-            user, error = db.create_user(email, password)
-            if error:
-                st.error(error)
-            else:
-                st.session_state.user_id, st.session_state.email = user.id, user.email
-                st.success("Account created on the Basic plan.")
-                st.rerun()
-
-
 def run_scan(source: Path | int, source_name: str, *, live_seconds: int | None = None,
              enable_vlm: bool = False) -> None:
     user_id = st.session_state.user_id
@@ -88,7 +58,7 @@ def run_scan(source: Path | int, source_name: str, *, live_seconds: int | None =
     threshold = db.get_alert_threshold(user_id)
     evidence_path = result.get("storyboard_path")
     alerted, alert_message = send_incident_alert(
-        st.session_state.email, result, evidence_path, threshold=threshold
+        os.getenv("ALERT_TO", ""), result, evidence_path, threshold=threshold
     )
     record = db.save_incident(user_id, result, source_name, evidence_path, alerted)
     st.session_state.last_scan = {
@@ -216,13 +186,10 @@ def dashboard() -> None:
     user_id = st.session_state.user_id
     plan, used, allowance = db.get_usage(user_id)
     with st.sidebar:
-        st.write(f"Signed in as **{st.session_state.email}**")
+        st.write("Shared workspace")
         st.write(f"Plan: **{plan}**")
         st.caption(f"Scans this month: {used}/{'Unlimited' if allowance is None else allowance}")
         page = st.radio("Portal", ["Threat analyzer", "Subscription", "Incident history"])
-        if st.button("Log out"):
-            st.session_state.clear()
-            st.rerun()
     st.title("AI-Powered Malicious Activity Detection & Alert System")
     st.caption("Local inference only. No paid API keys are used.")
     if page == "Threat analyzer":
@@ -234,6 +201,6 @@ def dashboard() -> None:
 
 
 if "user_id" not in st.session_state:
-    login_page()
-else:
-    dashboard()
+    workspace_user = db.get_workspace_user()
+    st.session_state.user_id = workspace_user.id
+dashboard()

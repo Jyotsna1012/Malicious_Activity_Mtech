@@ -53,7 +53,7 @@ An email is sent when `threat_percent` is strictly greater than the user thresho
 
 ## 5. Streamlit dashboard (`app.py`)
 
-The portal provides registration/login, plan selection, MP4/AVI upload, plan-gated webcam analysis, local live preview, progress, annotated playback, threat metrics/timeline, configurable Enterprise thresholds, and incident history with storyboard evidence. The server webcam is only available when Streamlit runs on a host with an attached camera.
+The portal opens directly into a shared workspace without a login or account-creation screen. It provides plan selection, MP4/AVI upload, plan-gated webcam analysis, local live preview, progress, annotated playback, threat metrics/timeline, configurable Enterprise thresholds, and incident history with storyboard evidence. Configure `ALERT_TO` alongside the SMTP settings to receive email alerts. The server webcam is only available when Streamlit runs on a host with an attached camera.
 
 Keep `.env` secrets and `user_data/` private. This is a dissertation prototype, not a hardened public SaaS deployment. Add production-grade session management, CSRF protections, rate limiting, private object storage, retention controls, HTTPS, and operational monitoring before exposing it to untrusted users.
 

@@ -135,6 +135,26 @@ def create_user(email: str, password: str) -> tuple[User | None, str | None]:
         return user, None
 
 
+def get_workspace_user() -> User:
+    """Return a shared dashboard identity, creating one for a fresh install."""
+    with SessionLocal() as db:
+        user = db.scalar(select(User).order_by(User.id).limit(1))
+        if user is not None:
+            db.expunge(user)
+            return user
+
+        user = User(
+            email="workspace@local.invalid",
+            password_hash=_hash_password(secrets.token_urlsafe(32)),
+        )
+        user.subscription = Subscription(plan="Basic", alert_threshold=DEFAULT_ALERT_THRESHOLD)
+        db.add(user)
+        db.commit()
+        db.refresh(user)
+        db.expunge(user)
+        return user
+
+
 def authenticate(email: str, password: str) -> User | None:
     with SessionLocal() as db:
         user = db.scalar(select(User).where(User.email == email.strip().lower()))

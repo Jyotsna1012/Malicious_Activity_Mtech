@@ -22,7 +22,7 @@ def send_incident_alert(recipient: str, result: dict, evidence_path: str | None,
     limit = ALERT_THRESHOLD if threshold is None else float(threshold)
     if float(result.get("threat_percent", 0.0)) <= limit:
         return False, f"No alert: activity score is not above {limit:.1f}%."
-    required = ("SMTP_HOST", "SMTP_PORT", "SMTP_USERNAME", "SMTP_PASSWORD", "ALERT_FROM")
+    required = ("SMTP_HOST", "SMTP_PORT", "SMTP_USERNAME", "SMTP_PASSWORD", "ALERT_FROM", "ALERT_TO")
     missing = [key for key in required if not os.getenv(key)]
     if missing:
         LOGGER.warning("MOCK INCIDENT ALERT | to=%s | score=%.1f%% | %s | SMTP missing: %s",
