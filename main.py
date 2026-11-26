@@ -749,6 +749,27 @@ print("LOGIC APPLIED             : Multi-person evaluation")
 print("REASON                    : Action + Emotion based")
 print("=====================================================\n")
 
+final_analysis = {
+    "video_classification_result": risk_log[idx],
+    "max_faces_detected": int(max(face_count_log)),
+    "estimated_people_count": int(np.median(person_count_log)),
+    "dominant_action": action_log[idx],
+    "dominant_emotion": emotion_log[idx],
+    "final_fight_type": final_fight_type,
+    "threat_score_max": int(max_threat),
+    "frame_activity_score": float(frame_activity_score),
+    "vision_assessment": llm_assessment["assessment"],
+    "vision_confidence": llm_assessment["confidence"],
+    "malicious_activity_score": float(malicious_activity_percent),
+    "summary_source": llm_assessment["summary_source"],
+    "vision_error": vision_error,
+    "frames_with_faces": int(sum(count > 0 for count in face_count_log)),
+    "frames_processed": int(len(face_count_log)),
+    "logic_applied": "Multi-person evaluation",
+    "reason": "Action + Emotion based",
+}
+print("FINAL_ANALYSIS_JSON: " + json.dumps(final_analysis, ensure_ascii=False))
+
 print("\n================ OPENAI VISION ASSESSMENT ================")
 print(f"Assessment                : {llm_assessment['assessment']}")
 if llm_assessment["confidence"] is None:

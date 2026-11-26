@@ -13,10 +13,44 @@ import streamlit as st
 import streamlit.components.v1 as components
 
 API_KEY = st.secrets["API_KEY"]
-PROCESSOR_VERSION = 10
+PROCESSOR_VERSION = 11
 
 BASE_DIR = Path(__file__).resolve().parent
 PROCESSOR = BASE_DIR / "main.py"
+
+
+def format_final_analysis(report):
+    """Render the processor's structured conclusion in a compact text report."""
+    confidence = report.get("vision_confidence")
+    confidence_text = f"{float(confidence):.0%}" if confidence is not None else "unavailable"
+    rows = [
+        ("VIDEO CLASSIFICATION RESULT", report.get("video_classification_result")),
+        ("Max Faces Detected", report.get("max_faces_detected")),
+        ("Estimated People Count", report.get("estimated_people_count")),
+        ("Dominant Action", report.get("dominant_action")),
+        ("Dominant Emotion", report.get("dominant_emotion")),
+        ("Final Fight Type", report.get("final_fight_type")),
+        ("Threat Score (Max)", f"{report.get('threat_score_max', 'Unavailable')} / 100"),
+        ("Frame Activity Score", f"{report.get('frame_activity_score', 'Unavailable')}%"),
+        ("Vision Assessment", report.get("vision_assessment")),
+        ("Vision Confidence", confidence_text),
+        ("Malicious Activity Score", f"{report.get('malicious_activity_score', 'Unavailable')}%"),
+        ("Summary Source", report.get("summary_source")),
+        ("Faces Found On", f"{report.get('frames_with_faces', 0)}/{report.get('frames_processed', 0)} frames"),
+        ("Logic Applied", report.get("logic_applied")),
+        ("Reason", report.get("reason")),
+    ]
+    label_width = max(len(label) for label, _ in rows)
+    lines = ["================ FINAL VIDEO ANALYSIS ================"]
+    lines.extend(f"{label:<{label_width}} : {value if value is not None else 'Unavailable'}"
+                 for label, value in rows)
+    error = report.get("vision_error")
+    if error:
+        if isinstance(error, (dict, list)):
+            error = json.dumps(error, ensure_ascii=False)
+        lines.append(f"Vision Error                  : {error}")
+    lines.append("=======================================================")
+    return "\n".join(lines)
 
 st.set_page_config(page_title="Video Activity Analysis", page_icon="🎥")
 st.title("Video Activity Analysis")
@@ -56,6 +90,7 @@ if uploaded_video and st.button("Process video", type="primary"):
     video_summary = None
     api_usage = None
     face_detection_summary = None
+    final_analysis = None
     upload_id = hashlib.sha256(uploaded_video.getbuffer()).hexdigest()
 
     try:
@@ -169,6 +204,16 @@ if uploaded_video and st.button("Process video", type="primary"):
                     face_detection_summary = json.loads(face_summary_match.group(1))
                 except json.JSONDecodeError:
                     face_detection_summary = None
+            final_analysis_match = re.search(
+                r"^FINAL_ANALYSIS_JSON:\s*(\{.+\})$",
+                processor_output,
+                re.MULTILINE,
+            )
+            if final_analysis_match:
+                try:
+                    final_analysis = json.loads(final_analysis_match.group(1))
+                except json.JSONDecodeError:
+                    final_analysis = None
             if output_path.is_file() and output_path.stat().st_size > 0:
                 video_bytes = output_path.read_bytes()
     except subprocess.TimeoutExpired as exc:
@@ -197,6 +242,7 @@ if uploaded_video and st.button("Process video", type="primary"):
         "video_summary": video_summary,
         "api_usage": api_usage,
         "face_detection_summary": face_detection_summary,
+        "final_analysis": final_analysis,
         "summary_source": "LOCAL_CV" if vision_error else "LLM_VISION",
     }
 
@@ -207,7 +253,7 @@ if video_result and uploaded_video and video_result.get("upload_id") == upload_i
     if result_video:
         st.success("Processed video is ready to play. Use the video controls to replay it anytime.")
         video_data = base64.b64encode(result_video).decode("ascii")
-        video_column, score_column = st.columns([3, 1])
+        video_column, score_column = st.columns([3, 2])
         with video_column:
             components.html(
                 """
@@ -246,51 +292,18 @@ if video_result and uploaded_video and video_result.get("upload_id") == upload_i
                 scrolling=False,
             )
         with score_column:
-            score = video_result.get("malicious_activity_percent")
-            st.metric(
-                "Frame-based heuristic score" if video_result.get("vision_error") else "Estimated malicious activity",
-                f"{score:.0f}%" if score is not None else "Unavailable",
-            )
-            if video_result.get("vision_error"):
-                st.caption(
-                    f"Average local frame-cue score: "
-                    f"{video_result.get('frame_activity_score') if video_result.get('frame_activity_score') is not None else 'Unavailable'}%. "
-                    "This is not the percent of video frames containing malicious activity."
-                )
+            st.markdown("#### Final video analysis")
+            report = video_result.get("final_analysis")
+            if report:
+                st.code(format_final_analysis(report), language="text")
             else:
-                vision_confidence_text = (
-                    f"{video_result['vision_confidence']:.0f}%"
-                    if video_result.get("vision_confidence") is not None
-                    else "unavailable"
-                )
-                st.caption(
-                    f"Frame cue score: {video_result.get('frame_activity_score') if video_result.get('frame_activity_score') is not None else 'Unavailable'}%. "
-                    f"Vision: {video_result.get('vision_assessment') or 'Unavailable'} "
-                    f"({vision_confidence_text} confidence)."
-                )
-                st.caption(
-                    "The displayed estimate takes the stronger frame cue or vision signal. "
-                    "It is not a probability or judgment of intent."
-                )
+                st.warning("The processor did not return its structured final analysis report.")
             usage = video_result.get("api_usage")
             if usage and usage.get("input_tokens") is not None:
                 st.caption(
                     f"Vision API usage: {usage['input_tokens']:,} input tokens, "
                     f"{usage.get('output_tokens') or 0:,} output tokens."
                 )
-            face_summary = video_result.get("face_detection_summary")
-            if face_summary:
-                if face_summary["frames_with_faces"] == 0:
-                    st.warning(
-                        "The local detector found no faces, so emotion findings are unavailable. "
-                        "Small, distant, blurred, turned-away, or occluded faces may be missed."
-                    )
-                else:
-                    st.caption(
-                        f"Local face detector: faces found on "
-                        f"{face_summary['frames_with_faces']}/{face_summary['frames_processed']} frames; "
-                        f"maximum {face_summary['maximum_faces_in_frame']} in one frame."
-                    )
 
         if video_result.get("vision_error"):
             st.warning(
