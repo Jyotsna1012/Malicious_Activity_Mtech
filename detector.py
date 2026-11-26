@@ -30,7 +30,7 @@ VIOLENT_TOKENS = (
     "judo", "headbutt", "brawl", "brawling", "choking", "strangling",
 )
 MIN_ACTION_RAM_GIB = float(os.getenv("MIN_ACTION_RAM_GIB", "4"))
-MIN_VLM_RAM_GIB = float(os.getenv("MIN_VLM_RAM_GIB", "9"))
+MIN_VLM_RAM_GIB = float(os.getenv("MIN_VLM_RAM_GIB", "16"))
 POSE_JOINTS = {"left_shoulder": 5, "right_shoulder": 6, "left_elbow": 7,
                "right_elbow": 8, "left_wrist": 9, "right_wrist": 10,
                "left_hip": 11, "right_hip": 12, "left_knee": 13,
@@ -207,7 +207,9 @@ def _load_vlm():
         except Exception:
             model = None
     if model is None:
-        model = Qwen2VLForConditionalGeneration.from_pretrained(VLM_MODEL_ID, **load_options).to(device)
+        model = Qwen2VLForConditionalGeneration.from_pretrained(
+            VLM_MODEL_ID, low_cpu_mem_usage=True, **load_options
+        ).to(device)
     return AutoProcessor.from_pretrained(VLM_MODEL_ID), model, torch, device
 
 
