@@ -19,8 +19,8 @@ BASE_DIR = Path(__file__).resolve().parent
 PROCESSOR = BASE_DIR / "main.py"
 
 
-def format_final_analysis(report):
-    """Render the processor's structured conclusion in a compact text report."""
+def final_analysis_rows(report):
+    """Return the structured result as wrapping label/value pairs."""
     confidence = report.get("vision_confidence")
     confidence_text = f"{float(confidence):.0%}" if confidence is not None else "unavailable"
     rows = [
@@ -40,17 +40,7 @@ def format_final_analysis(report):
         ("Logic Applied", report.get("logic_applied")),
         ("Reason", report.get("reason")),
     ]
-    label_width = max(len(label) for label, _ in rows)
-    lines = ["================ FINAL VIDEO ANALYSIS ================"]
-    lines.extend(f"{label:<{label_width}} : {value if value is not None else 'Unavailable'}"
-                 for label, value in rows)
-    error = report.get("vision_error")
-    if error:
-        if isinstance(error, (dict, list)):
-            error = json.dumps(error, ensure_ascii=False)
-        lines.append(f"Vision Error                  : {error}")
-    lines.append("=======================================================")
-    return "\n".join(lines)
+    return [(label, value if value is not None else "Unavailable") for label, value in rows]
 
 st.set_page_config(page_title="Video Activity Analysis", page_icon="🎥")
 st.title("Video Activity Analysis")
@@ -253,57 +243,63 @@ if video_result and uploaded_video and video_result.get("upload_id") == upload_i
     if result_video:
         st.success("Processed video is ready to play. Use the video controls to replay it anytime.")
         video_data = base64.b64encode(result_video).decode("ascii")
-        video_column, score_column = st.columns([3, 2])
-        with video_column:
-            components.html(
-                """
-                <video id="processed-video" controls playsinline preload="metadata"
-                       style="display:block;width:100%;max-height:70vh;background:#111">
-                  <source src="data:video/mp4;base64,__VIDEO_DATA__" type="video/mp4">
-                </video>
-                <div id="playback-status" role="status" aria-live="polite"
-                     style="font:14px sans-serif;padding:8px 0;color:#555">
-                  Loading video metadata...
-                </div>
-                <script>
-                  const player = document.getElementById("processed-video");
-                  const status = document.getElementById("playback-status");
-                  const mediaErrors = {
-                    1: "Playback was cancelled.",
-                    2: "The browser had a network error while loading the video.",
-                    3: "The browser could not decode this video. Its codec or file data may be invalid.",
-                    4: "The browser does not support this video format or codec."
-                  };
-                  player.addEventListener("loadedmetadata", () => {
-                    status.textContent = `Video loaded (${player.videoWidth}x${player.videoHeight}, ` +
-                      `${Number.isFinite(player.duration) ? player.duration.toFixed(1) + " s" : "duration unknown"}).`;
-                  });
-                  player.addEventListener("error", () => {
-                    const error = player.error;
-                    const code = error ? error.code : 0;
-                    status.textContent = `Playback error${code ? ` (code ${code})` : ""}: ` +
-                      `${mediaErrors[code] || "The browser could not load the processed video."}` +
-                      `${error && error.message ? ` Details: ${error.message}` : ""}`;
-                    status.style.color = "#b00020";
-                  });
-                </script>
-                """.replace("__VIDEO_DATA__", video_data),
-                height=500,
-                scrolling=False,
+        components.html(
+            """
+            <video id="processed-video" controls playsinline preload="metadata"
+                   style="display:block;width:100%;max-height:70vh;background:#111">
+              <source src="data:video/mp4;base64,__VIDEO_DATA__" type="video/mp4">
+            </video>
+            <div id="playback-status" role="status" aria-live="polite"
+                 style="font:14px sans-serif;padding:8px 0;color:#555">
+              Loading video metadata...
+            </div>
+            <script>
+              const player = document.getElementById("processed-video");
+              const status = document.getElementById("playback-status");
+              const mediaErrors = {
+                1: "Playback was cancelled.",
+                2: "The browser had a network error while loading the video.",
+                3: "The browser could not decode this video. Its codec or file data may be invalid.",
+                4: "The browser does not support this video format or codec."
+              };
+              player.addEventListener("loadedmetadata", () => {
+                status.textContent = `Video loaded (${player.videoWidth}x${player.videoHeight}, ` +
+                  `${Number.isFinite(player.duration) ? player.duration.toFixed(1) + " s" : "duration unknown"}).`;
+              });
+              player.addEventListener("error", () => {
+                const error = player.error;
+                const code = error ? error.code : 0;
+                status.textContent = `Playback error${code ? ` (code ${code})` : ""}: ` +
+                  `${mediaErrors[code] || "The browser could not load the processed video."}` +
+                  `${error && error.message ? ` Details: ${error.message}` : ""}`;
+                status.style.color = "#b00020";
+              });
+            </script>
+            """.replace("__VIDEO_DATA__", video_data),
+            height=500,
+            scrolling=False,
+        )
+
+        st.markdown("### Final video analysis")
+        report = video_result.get("final_analysis")
+        if report:
+            detail_rows = final_analysis_rows(report)
+            for index in range(0, len(detail_rows), 2):
+                left, right = st.columns(2)
+                for column, (label, value) in zip((left, right), detail_rows[index:index + 2]):
+                    with column:
+                        st.caption(label)
+                        st.write(value)
+            if report.get("vision_error"):
+                st.warning(f"Vision Error: {report['vision_error']}")
+        else:
+            st.warning("The processor did not return its structured final analysis report.")
+        usage = video_result.get("api_usage")
+        if usage and usage.get("input_tokens") is not None:
+            st.caption(
+                f"Vision API usage: {usage['input_tokens']:,} input tokens, "
+                f"{usage.get('output_tokens') or 0:,} output tokens."
             )
-        with score_column:
-            st.markdown("#### Final video analysis")
-            report = video_result.get("final_analysis")
-            if report:
-                st.code(format_final_analysis(report), language="text")
-            else:
-                st.warning("The processor did not return its structured final analysis report.")
-            usage = video_result.get("api_usage")
-            if usage and usage.get("input_tokens") is not None:
-                st.caption(
-                    f"Vision API usage: {usage['input_tokens']:,} input tokens, "
-                    f"{usage.get('output_tokens') or 0:,} output tokens."
-                )
 
         if video_result.get("vision_error"):
             st.warning(
