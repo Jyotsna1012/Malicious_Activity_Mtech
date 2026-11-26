@@ -1,17 +1,6 @@
-# python -m pip install -r requirements.txt
-# python -m streamlit run app.py
-
-tensorflow>=2.16.1,<2.17.0
-numpy==1.26.4
-pandas==2.2.3
-pillow==10.4.0
-seaborn==0.13.2
+# Small deployment runtime. PyTorch is only needed in requirements-training.txt.
+streamlit>=1.50,<2.0
+numpy>=1.26,<2.0
 opencv-python-headless==4.10.0.84
-imageio-ffmpeg==0.5.1
-ipython==8.27.0
-matplotlib==3.8.4
-scikit-learn==1.5.2
-ipykernel==6.29.5
-mediapipe==0.10.21
-openai==2.8.1
-streamlit>=1.40,<2.0
+onnxruntime>=1.18,<2.0
+python-dotenv>=1.0,<2.0
