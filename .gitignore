@@ -25,16 +25,10 @@ htmlcov/
 
 # Large local training datasets (Emotion.py expects these locally)
 Dataset/
-training/data/
 
 # Extra model checkpoints; the app uses the root-level
 # FacialExpression_weights.keras file
 model/
-*.pt
-*.pth
-*.safetensors
-models/fight_detector.fp32.onnx
-models/fight_detector.int8.onnx
 
 # Generated processed videos and runtime logs
 *_annotated.mp4

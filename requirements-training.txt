@@ -1,7 +1,0 @@
--r requirements.txt
-
-# Training/export only; do not install these into the Streamlit deployment.
-torch>=2.2,<3.0
-torchvision>=0.17,<1.0
-scikit-learn>=1.4,<2.0
-onnx>=1.16,<2.0
